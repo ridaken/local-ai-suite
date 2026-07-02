@@ -138,6 +138,37 @@ All settings live in `config/.env` (see `config/.env.example` for the annotated
 template): `DATA_ROOT`/`ZIM_DIR`, `KIWIX_URL`/`KIWIX_BOOK`, `KAGI_API_KEY`,
 `NCBI_API_KEY`/`NCBI_EMAIL`, and default result limits.
 
+## Development workflow
+
+`main` is protected — no direct commits. All changes go through a pull request.
+
+One-time setup to enable the local guard (blocks accidental pushes to `main`):
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+(GitHub rejects branch-protection rulesets on this free-plan private repo —
+the API returns "Upgrade to GitHub Pro or make this repository public to
+enable this feature" — so the `.githooks/pre-push` hook enforces the same
+rule locally in the meantime.)
+
+Then, for each change:
+
+```powershell
+git checkout -b feat/short-description
+# ... make changes ...
+./.venv/Scripts/python.exe -m ruff check .   # lint
+./.venv/Scripts/python.exe -m pytest         # tests
+git add -A
+git commit -m "..."
+git push -u origin HEAD
+gh pr create --fill
+```
+
+CI (`.github/workflows/ci.yml`) runs `ruff check` + `pytest` on every PR and must
+pass before merging. Add or update tests under `tests/` alongside code changes.
+
 ## Roadmap
 
 - **Phase 2** — Qdrant + `bge-m3` embeddings + `bge-reranker-v2-m3`; `kb_search`

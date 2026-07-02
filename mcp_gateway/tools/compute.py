@@ -35,7 +35,12 @@ _NAMES: dict[str, object] = {
     )
     if hasattr(math, k)
 }
-_NAMES.update({"pi": math.pi, "e": math.e, "tau": math.tau, "inf": math.inf, "abs": abs, "round": round, "min": min, "max": max})
+_NAMES.update(
+    {
+        "pi": math.pi, "e": math.e, "tau": math.tau, "inf": math.inf,
+        "abs": abs, "round": round, "min": min, "max": max,
+    }
+)
 
 _MAX_POW = 1_000_000  # guard against giant exponents locking the CPU
 
@@ -87,6 +92,6 @@ async def calculate(expression: str) -> str:
         return f"calculate error: {exc}"
     except SyntaxError:
         return "calculate error: could not parse the expression."
-    except (ValueError, OverflowError, ZeroDivisionError) as exc:
+    except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
         return f"calculate error: {exc}"
     return f"{expression} = {value}"

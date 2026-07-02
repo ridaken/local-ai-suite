@@ -66,7 +66,9 @@ async def pubmed_search(query: str, limit: int = 5) -> str:
         pubdate = (doc.get("pubdate") or "").strip()
         authors = doc.get("authors") or []
         first_author = authors[0].get("name", "") if authors else ""
-        byline = ", ".join(x for x in [first_author + (" et al." if len(authors) > 1 else ""), journal, pubdate] if x)
+        if first_author and len(authors) > 1:
+            first_author += " et al."
+        byline = ", ".join(x for x in [first_author, journal, pubdate] if x)
         lines.append(f"{i}. {title}")
         if byline:
             lines.append(f"   {byline}")
