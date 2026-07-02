@@ -1,0 +1,19 @@
+# Local config with secrets / machine-specific paths
+config/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Large data (lives under DATA_ROOT, never in the repo — see README)
+zim/
+data/
+state.db
+
+# Editor
+.vscode/
+.idea/
