@@ -1,0 +1,16 @@
+#!/bin/sh
+# Block direct pushes to main — changes must go through a PR from a feature branch.
+# (Server-side branch protection needs GitHub Pro on private repos; this hook gives
+# the same "never commit to main directly" guard locally. Enable with:
+#   git config core.hooksPath .githooks )
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    echo "" >&2
+    echo "  x  Direct pushes to main are blocked. Use a feature branch + PR:" >&2
+    echo "       git checkout -b feat/your-change" >&2
+    echo "       git push -u origin HEAD && gh pr create --fill" >&2
+    echo "" >&2
+    exit 1
+  fi
+done
+exit 0

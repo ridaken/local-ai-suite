@@ -140,7 +140,18 @@ template): `DATA_ROOT`/`ZIM_DIR`, `KIWIX_URL`/`KIWIX_BOOK`, `KAGI_API_KEY`,
 
 ## Development workflow
 
-`main` is protected — no direct commits. All changes go through a pull request:
+`main` is protected — no direct commits. All changes go through a pull request.
+
+One-time setup to enable the local guard (blocks accidental pushes to `main`):
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+(Server-side branch protection needs GitHub Pro on a private repo; the
+`.githooks/pre-push` hook enforces the same rule locally in the meantime.)
+
+Then, for each change:
 
 ```powershell
 git checkout -b feat/short-description
