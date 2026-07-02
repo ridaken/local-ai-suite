@@ -1,8 +1,8 @@
 #!/bin/sh
 # Block direct pushes to main — changes must go through a PR from a feature branch.
-# (Server-side branch protection needs GitHub Pro on private repos; this hook gives
-# the same "never commit to main directly" guard locally. Enable with:
-#   git config core.hooksPath .githooks )
+# This stands in for server-side branch protection, which GitHub's API rejects on
+# this free-plan private repo. Enable once per clone with:
+#   git config core.hooksPath .githooks
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
   if [ "$remote_ref" = "refs/heads/main" ]; then
     echo "" >&2

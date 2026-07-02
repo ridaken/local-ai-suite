@@ -148,8 +148,10 @@ One-time setup to enable the local guard (blocks accidental pushes to `main`):
 git config core.hooksPath .githooks
 ```
 
-(Server-side branch protection needs GitHub Pro on a private repo; the
-`.githooks/pre-push` hook enforces the same rule locally in the meantime.)
+(GitHub rejects branch-protection rulesets on this free-plan private repo —
+the API returns "Upgrade to GitHub Pro or make this repository public to
+enable this feature" — so the `.githooks/pre-push` hook enforces the same
+rule locally in the meantime.)
 
 Then, for each change:
 
@@ -158,7 +160,8 @@ git checkout -b feat/short-description
 # ... make changes ...
 ./.venv/Scripts/python.exe -m ruff check .   # lint
 ./.venv/Scripts/python.exe -m pytest         # tests
-git commit -am "..."
+git add -A
+git commit -m "..."
 git push -u origin HEAD
 gh pr create --fill
 ```

@@ -39,3 +39,7 @@ def test_rejects_unknown_names():
 
 def test_syntax_error_is_handled():
     assert "error" in run("1 +").lower()
+
+
+def test_wrong_arity_is_handled():
+    assert "error" in run("sqrt(1, 2)").lower()

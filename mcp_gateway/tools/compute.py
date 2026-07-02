@@ -92,6 +92,6 @@ async def calculate(expression: str) -> str:
         return f"calculate error: {exc}"
     except SyntaxError:
         return "calculate error: could not parse the expression."
-    except (ValueError, OverflowError, ZeroDivisionError) as exc:
+    except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
         return f"calculate error: {exc}"
     return f"{expression} = {value}"
