@@ -138,6 +138,23 @@ All settings live in `config/.env` (see `config/.env.example` for the annotated
 template): `DATA_ROOT`/`ZIM_DIR`, `KIWIX_URL`/`KIWIX_BOOK`, `KAGI_API_KEY`,
 `NCBI_API_KEY`/`NCBI_EMAIL`, and default result limits.
 
+## Development workflow
+
+`main` is protected — no direct commits. All changes go through a pull request:
+
+```powershell
+git checkout -b feat/short-description
+# ... make changes ...
+./.venv/Scripts/python.exe -m ruff check .   # lint
+./.venv/Scripts/python.exe -m pytest         # tests
+git commit -am "..."
+git push -u origin HEAD
+gh pr create --fill
+```
+
+CI (`.github/workflows/ci.yml`) runs `ruff check` + `pytest` on every PR and must
+pass before merging. Add or update tests under `tests/` alongside code changes.
+
 ## Roadmap
 
 - **Phase 2** — Qdrant + `bge-m3` embeddings + `bge-reranker-v2-m3`; `kb_search`

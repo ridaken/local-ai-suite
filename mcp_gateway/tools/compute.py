@@ -35,7 +35,12 @@ _NAMES: dict[str, object] = {
     )
     if hasattr(math, k)
 }
-_NAMES.update({"pi": math.pi, "e": math.e, "tau": math.tau, "inf": math.inf, "abs": abs, "round": round, "min": min, "max": max})
+_NAMES.update(
+    {
+        "pi": math.pi, "e": math.e, "tau": math.tau, "inf": math.inf,
+        "abs": abs, "round": round, "min": min, "max": max,
+    }
+)
 
 _MAX_POW = 1_000_000  # guard against giant exponents locking the CPU
 
