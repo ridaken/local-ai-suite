@@ -1,0 +1,22 @@
+# Curated corpora to embed into Qdrant (the vector tier). Keep this list BOUNDED —
+# your own repos, notes, and selected docs — not giant public corpora (those stay
+# as Kiwix ZIMs). Edit roots to point at what you want retrievable, then run:
+#   .venv/Scripts/python.exe -m ingest.ingest
+#
+# Each source: root (folder), label (prefix used in citations), include/exclude
+# globs (relative to root; .git/.venv/node_modules/__pycache__ are always skipped).
+sources:
+  - root: C:/Users/Tom/Documents/Repos/local-ai-suite
+    label: local-ai-suite
+    include:
+      - "**/*.py"
+      - "**/*.md"
+      - "**/*.yml"
+      - "**/*.yaml"
+    exclude:
+      - "**/.venv/**"
+
+  # Add more repos/notes, e.g.:
+  # - root: C:/Users/Tom/Documents/Repos/scanfiler
+  #   label: scanfiler
+  #   include: ["**/*.py", "**/*.md"]

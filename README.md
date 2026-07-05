@@ -10,17 +10,20 @@ which tool to call; the client harness runs the agent loop. See the full design
 in the plan document (`docs/DESIGN.md`), including the phased roadmap and architecture
 diagrams.
 
-**This is Phase 1** — local Wikipedia (Kiwix full-text search) + online API tools,
-with no vector database or embeddings yet. Semantic search over your own repos
-(Qdrant + reranker) arrives in Phase 2.
+**Phase 1** is the offline knowledge base (Kiwix full-text) + online API tools.
+**Phase 2** (in this build) adds the vector tier: `kb_search` becomes *hybrid*
+(Kiwix lexical + Qdrant semantic → reranked), plus an incremental ingest pipeline
+that embeds your own repos/notes. The vector tier is optional — with `QDRANT_URL`
+or `EMBED_URL` unset, `kb_search` degrades to Kiwix-only, so Phase 1 still stands
+on its own.
 
 ---
 
-## What you get in Phase 1
+## Tools
 
 | Tool | Backend | Notes |
 |------|---------|-------|
-| `kb_search` | kiwix-serve full-text | Offline; needs a ZIM loaded |
+| `kb_search` | Kiwix FTS (+ Qdrant vectors, reranked) | Offline; hybrid when the vector tier is on |
 | `web_search` | Kagi Search API | Needs `KAGI_API_KEY` |
 | `pubmed_search` | NCBI E-utilities | Live; key optional (higher rate limit) |
 | `arxiv_search` | arXiv API | Live |
@@ -45,10 +48,19 @@ with no vector database or embeddings yet. Semantic search over your own repos
    large data lives wherever you choose.
 
 2. **Get a ZIM (explicit — nothing auto-downloads).** Browse
-   <https://download.kiwix.org/zim/> and grab one. A small Wikipedia `nopic`/`mini`
-   build is a good first test:
+   <https://download.kiwix.org/zim/> and grab one. A small Wikipedia `nopic`
+   build is a good first test (prefer `nopic`/`maxi` over `mini` — `mini` builds
+   may lack the full-text index that `kb_search` needs):
    ```powershell
    ./scripts/download_zim.ps1 -Url "https://download.kiwix.org/zim/wikipedia/<pick-one>.zim"
+   ```
+   **Coding corpus (quick win):** for technical Q&A, also grab StackOverflow and
+   DevDocs ZIMs — they're lexically searchable through `kb_search` immediately, no
+   vector tier required:
+   ```powershell
+   # StackOverflow (~75 GB; use a _nopic build to save space) and DevDocs docsets
+   ./scripts/download_zim.ps1 -Url "https://download.kiwix.org/zim/stack_exchange/<stackoverflow_...>.zim"
+   ./scripts/download_zim.ps1 -Url "https://download.kiwix.org/zim/devdocs/<devdocs_en_python_...>.zim"
    ```
 
 3. **Start kiwix-serve:**
@@ -132,11 +144,41 @@ You're done with Phase 1 when all of these pass:
   answers with a source URL. Ask a math question → `calculate` fires.
 - In **OpenWebUI** (via mcpo): the same tools are callable and cited.
 
+## Phase 2 — semantic search over your own code/notes
+
+This adds the vector tier so `kb_search` also retrieves *your* corpora by meaning,
+not just keywords. Four steps:
+
+1. **Serve embeddings + a reranker** with llama-server (small, always-on),
+   matching the endpoints in `config/.env`:
+   ```powershell
+   # embeddings (bge-m3) on :8081, reranker (bge-reranker-v2-m3) on :8082
+   llama-server -m bge-m3.gguf --embedding --port 8081
+   llama-server -m bge-reranker-v2-m3.gguf --reranking --port 8082
+   ```
+2. **Start Qdrant** (already in the compose file):
+   ```powershell
+   docker compose --env-file config/.env up -d qdrant
+   ```
+3. **Point `ingest/sources.yaml` at your repos/notes** (bounded — your code, not
+   giant public corpora), then index. Only changed files are re-embedded on
+   re-runs:
+   ```powershell
+   ./.venv/Scripts/python.exe -m ingest.ingest
+   ```
+4. Now `kb_search` merges Kiwix lexical hits with Qdrant semantic hits and reranks
+   them. To keep it fresh, schedule the ingest command (Task Scheduler) to re-run
+   on a cadence.
+
+Verify: `python scripts/smoke_test.py` still passes, and after ingest a query
+about your own code returns a `[curated]` result citing `label/path:line`.
+
 ## Configuration reference
 
 All settings live in `config/.env` (see `config/.env.example` for the annotated
 template): `DATA_ROOT`/`ZIM_DIR`, `KIWIX_URL`/`KIWIX_BOOK`, `KAGI_API_KEY`,
-`NCBI_API_KEY`/`NCBI_EMAIL`, and default result limits.
+`NCBI_API_KEY`/`NCBI_EMAIL`, result limits, and the Phase 2 vector-tier settings
+(`QDRANT_*`, `EMBED_*`, `RERANK_*`, `CHUNK_*`, `STATE_DB`).
 
 ## Development workflow
 
@@ -171,10 +213,10 @@ pass before merging. Add or update tests under `tests/` alongside code changes.
 
 ## Roadmap
 
-- **Phase 2** — Qdrant + `bge-m3` embeddings + `bge-reranker-v2-m3`; `kb_search`
-  becomes hybrid (Kiwix FTS + vectors → rerank); incremental ingest of your own
-  repos/notes/docs; add StackOverflow/DevDocs ZIMs.
-- **Phase 3** — SearXNG, `wolfram`/`units`/`datetime`, geospatial `route` tool,
-  and retrieval-and-verify skills.
+- **Phase 2 (done)** — Qdrant + `bge-m3` embeddings + `bge-reranker-v2-m3`;
+  `kb_search` is hybrid (Kiwix FTS + vectors → rerank); incremental ingest of your
+  own repos/notes/docs. StackOverflow/DevDocs ZIMs slot into Kiwix as above.
+- **Phase 3 (next)** — SearXNG, `wolfram`/`units`/`datetime`, geospatial `route`
+  tool, and retrieval-and-verify skills.
 
 See `docs/DESIGN.md` for the full blueprint.

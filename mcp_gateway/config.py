@@ -49,3 +49,36 @@ WEB_SEARCH_LIMIT = _int("WEB_SEARCH_LIMIT", 5)
 # Shared HTTP settings
 HTTP_TIMEOUT = 20.0
 USER_AGENT = f"local-ai-suite/{os.environ.get('LAS_VERSION', '0.1.0')} (mcp-gateway)"
+
+
+# --- Phase 2: semantic retrieval ---------------------------------------------
+# Vector DB. QDRANT_URL is used by the compose service; leave blank to disable the
+# vector tier entirely (kb_search then falls back to Kiwix-only lexical search).
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333").strip()
+QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "las_curated").strip()
+
+# Embeddings + reranker served by llama-server (OpenAI-compatible endpoints).
+# Blank EMBED_URL also disables the vector tier.
+EMBED_URL = os.environ.get("EMBED_URL", "http://localhost:8081/v1/embeddings").strip()
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "bge-m3").strip()
+EMBED_DIM = _int("EMBED_DIM", 1024)  # bge-m3 = 1024
+RERANK_URL = os.environ.get("RERANK_URL", "http://localhost:8082/v1/rerank").strip()
+RERANK_MODEL = os.environ.get("RERANK_MODEL", "bge-reranker-v2-m3").strip()
+
+# Retrieval sizing: how many candidates each source contributes before reranking,
+# and how many survive to the answer.
+HYBRID_VECTOR_CANDIDATES = _int("HYBRID_VECTOR_CANDIDATES", 20)
+HYBRID_KIWIX_CANDIDATES = _int("HYBRID_KIWIX_CANDIDATES", 20)
+
+# Ingest / chunking. Sizes are in characters (~4 chars per token) to avoid a
+# tokenizer dependency; STATE_DB is the incremental manifest.
+CHUNK_MAX_CHARS = _int("CHUNK_MAX_CHARS", 2000)
+CHUNK_OVERLAP_CHARS = _int("CHUNK_OVERLAP_CHARS", 200)
+STATE_DB = os.environ.get(
+    "STATE_DB", str(Path(__file__).resolve().parent.parent / "ingest" / "state.db")
+).strip()
+
+
+def vector_tier_enabled() -> bool:
+    """The vector tier is active only if both a vector DB and an embedder are set."""
+    return bool(QDRANT_URL and EMBED_URL)

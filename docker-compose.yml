@@ -1,8 +1,8 @@
-# Phase 1 infrastructure: kiwix-serve only.
-# Qdrant / SearXNG are added in later phases (see plan).
+# Infrastructure: kiwix-serve (offline docs) + qdrant (vector DB, Phase 2).
+# SearXNG is added in a later phase (see docs/DESIGN.md).
 #
-# Data is bind-mounted from ZIM_DIR on your data drive (see config/.env),
-# so nothing large is stored inside the repo. Start with:
+# Data is bind-mounted from your data drive (see config/.env), so nothing large
+# is stored inside the repo. Start with:
 #   docker compose --env-file config/.env up -d
 services:
   kiwix:
@@ -16,3 +16,13 @@ services:
     volumes:
       - "${ZIM_DIR}:/data:ro"
     working_dir: /data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: las-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"  # REST/gRPC API
+    volumes:
+      # Vector storage — small (curated corpora only); keep on SSD (see DESIGN.md).
+      - "${QDRANT_STORAGE:-./data/qdrant}:/qdrant/storage"
