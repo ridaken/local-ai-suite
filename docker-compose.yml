@@ -1,18 +1,94 @@
-# Phase 1 infrastructure: kiwix-serve only.
-# Qdrant / SearXNG are added in later phases (see plan).
+# Infrastructure: kiwix-serve (offline docs) + qdrant (vector DB, Phase 2) +
+# gateway (Phase 3 management plane: MCP-over-HTTP + admin UI). SearXNG is
+# added in a later phase (see docs/DESIGN.md).
 #
-# Data is bind-mounted from ZIM_DIR on your data drive (see config/.env),
-# so nothing large is stored inside the repo. Start with:
+# Data is bind-mounted from your data drive (see config/.env), so nothing large
+# is stored inside the repo. Start with:
 #   docker compose --env-file config/.env up -d
+#
+# config/.env is optional — `docker compose up -d --build` works with zero
+# configuration (ZIM_DIR falls back to ./data/zim next to the repo; the
+# gateway's env_file is not required to exist). The admin UI at :8090 flags
+# anything that still needs setting. Point ZIM_DIR at a real data drive
+# whenever you're ready — see README.md.
 services:
+  # kiwix's --library mode requires library.xml to exist before it will even
+  # start. Seed an empty one (a placeholder, not a real listing — the gateway
+  # overwrites it with real book entries on its own startup and on every
+  # add/delete) so kiwix works standalone without ever needing the gateway
+  # image built — this keeps Phase 1 (kiwix-only) dependency-free.
+  library-init:
+    image: busybox:latest
+    container_name: las-library-init
+    command:
+      - sh
+      - -c
+      - "test -f /data/library.xml || printf '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n<library version=\"20110515\"></library>\\n' > /data/library.xml"
+    volumes:
+      - "${ZIM_DIR:-./data/zim}:/data"
+    restart: "no"
+
   kiwix:
     image: ghcr.io/kiwix/kiwix-serve:latest
     container_name: las-kiwix
     restart: unless-stopped
+    depends_on:
+      library-init:
+        condition: service_completed_successfully
     ports:
       - "8080:8080"
-    # Serve every *.zim found in ZIM_DIR. Add/remove ZIMs on disk, then restart.
-    command: ["--port", "8080", "*.zim"]
+    # Library mode: serves whatever library.xml lists (the gateway writes this
+    # as ZIMs are added/removed) and hot-reloads on change — no restart needed.
+    command: ["--port", "8080", "--library", "--monitorLibrary", "/data/library.xml"]
     volumes:
-      - "${ZIM_DIR}:/data:ro"
+      - "${ZIM_DIR:-./data/zim}:/data:ro"
     working_dir: /data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: las-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"  # REST/gRPC API
+    volumes:
+      # Vector storage — small (curated corpora only); keep on SSD (see DESIGN.md).
+      - "${QDRANT_STORAGE:-./data/qdrant}:/qdrant/storage"
+
+  gateway:
+    build: .
+    container_name: las-gateway
+    restart: unless-stopped
+    depends_on:
+      - kiwix
+      - qdrant
+    # Admin UI + MCP-over-HTTP. Loopback-only on the host by default — this is
+    # an unauthenticated surface, so think before widening this to 0.0.0.0.
+    ports:
+      - "127.0.0.1:${ADMIN_PORT:-8090}:8090"
+    # Optional — the gateway has sane fallback defaults for everything here
+    # and the admin UI (http://localhost:8090) surfaces what's still worth
+    # setting, so a missing config/.env does not block startup.
+    env_file:
+      - path: config/.env
+        required: false
+    environment:
+      # Container-internal endpoints override config/.env's host-oriented
+      # defaults (those are for running the gateway directly on the host, e.g.
+      # pi's stdio launch). host.docker.internal resolves out of the box on
+      # Docker Desktop (Windows/Mac) — this targets the co-located Windows
+      # inference PC deployment (see docs/DESIGN.md).
+      KIWIX_URL: http://kiwix:8080
+      QDRANT_URL: http://qdrant:6333
+      EMBED_URL: http://host.docker.internal:8081/v1/embeddings
+      RERANK_URL: http://host.docker.internal:8082/v1/rerank
+      ZIM_DIR: /data
+      KIWIX_DATA_DIR: /data
+      ADMIN_HOST: 0.0.0.0
+      ADMIN_PORT: "8090"
+      # Persist under the same bind mount as the ZIMs rather than the
+      # container's ephemeral filesystem.
+      STATE_DB: /data/state.db
+      SETTINGS_DB: /data/settings.db
+    volumes:
+      # Read-write: the admin UI downloads/deletes ZIMs and writes library.xml here.
+      - "${ZIM_DIR:-./data/zim}:/data"
