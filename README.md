@@ -44,6 +44,13 @@ additive — the stdio wiring below still works unchanged if you don't need it.
 
 ## Setup
 
+`config/.env` is optional — every setting has a working fallback, so
+`docker compose up -d --build` boots the full stack (including the admin UI)
+with zero configuration. Without it, ZIM data lands in `./data/zim` next to
+the repo, and the admin UI at `:8090` shows a "Setup needed" banner pointing
+at anything worth fixing (currently: pick a real data directory). It's still
+worth doing step 1 up front if you already know where your data drive lives.
+
 1. **Configure paths and keys.** Copy the template and edit it:
    ```powershell
    Copy-Item config/.env.example config/.env
@@ -206,6 +213,10 @@ works exactly as in Phase 1/2 if you don't need this.
    - **Downloads** — progress for in-flight downloads.
    - **Settings** — switch `kb_search` between hybrid / lexical-only /
      vector-only, and toggle reranking.
+
+   If `ZIM_DIR` was never set, every page shows a "Setup needed" banner and
+   the Catalog page's Download buttons are disabled until you set it — the
+   gateway still starts and stays reachable either way.
 3. **Point pi at the HTTP endpoint** (`http://localhost:8090/mcp`) instead of
    spawning the stdio process, if you'd rather it talk to the containerized
    gateway — check pi's docs for the exact config key for a remote MCP server,

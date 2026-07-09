@@ -5,6 +5,12 @@
 # Data is bind-mounted from your data drive (see config/.env), so nothing large
 # is stored inside the repo. Start with:
 #   docker compose --env-file config/.env up -d
+#
+# config/.env is optional — `docker compose up -d --build` works with zero
+# configuration (ZIM_DIR falls back to ./data/zim next to the repo; the
+# gateway's env_file is not required to exist). The admin UI at :8090 flags
+# anything that still needs setting. Point ZIM_DIR at a real data drive
+# whenever you're ready — see README.md.
 services:
   # kiwix's --library mode requires library.xml to exist before it will even
   # start. Seed an empty one (a placeholder, not a real listing — the gateway
@@ -19,7 +25,7 @@ services:
       - -c
       - "test -f /data/library.xml || printf '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n<library version=\"20110515\"></library>\\n' > /data/library.xml"
     volumes:
-      - "${ZIM_DIR}:/data"
+      - "${ZIM_DIR:-./data/zim}:/data"
     restart: "no"
 
   kiwix:
@@ -35,7 +41,7 @@ services:
     # as ZIMs are added/removed) and hot-reloads on change — no restart needed.
     command: ["--port", "8080", "--library", "--monitorLibrary", "/data/library.xml"]
     volumes:
-      - "${ZIM_DIR}:/data:ro"
+      - "${ZIM_DIR:-./data/zim}:/data:ro"
     working_dir: /data
 
   qdrant:
@@ -59,8 +65,12 @@ services:
     # an unauthenticated surface, so think before widening this to 0.0.0.0.
     ports:
       - "127.0.0.1:${ADMIN_PORT:-8090}:8090"
+    # Optional — the gateway has sane fallback defaults for everything here
+    # and the admin UI (http://localhost:8090) surfaces what's still worth
+    # setting, so a missing config/.env does not block startup.
     env_file:
-      - config/.env
+      - path: config/.env
+        required: false
     environment:
       # Container-internal endpoints override config/.env's host-oriented
       # defaults (those are for running the gateway directly on the host, e.g.
@@ -81,4 +91,4 @@ services:
       SETTINGS_DB: /data/settings.db
     volumes:
       # Read-write: the admin UI downloads/deletes ZIMs and writes library.xml here.
-      - "${ZIM_DIR}:/data"
+      - "${ZIM_DIR:-./data/zim}:/data"

@@ -26,6 +26,19 @@ def _client(tmp_path, *, download_manager=None):
     return TestClient(app), settings, manager, zim_dir
 
 
+def _client_no_zim_dir(tmp_path, *, download_manager=None):
+    """Mirrors an unconfigured host-mode gateway: no ZIM_DIR / .env at all."""
+    settings = SettingsStore(tmp_path / "settings.db")
+    manager = download_manager or DownloadManager(tmp_path / "unused")
+    app = admin.build_admin_app(
+        settings=settings,
+        download_manager=manager,
+        zim_dir="",
+        library_xml_path="",
+    )
+    return TestClient(app), settings, manager
+
+
 async def _fake_reachable(url: str) -> str:
     return "reachable" if url else "unconfigured"
 
@@ -38,6 +51,7 @@ def test_dashboard_renders_service_badges(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert "reachable" in resp.text
     assert "Dashboard" in resp.text or "local-ai-suite admin" in resp.text
+    assert "Setup needed" not in resp.text  # ZIM_DIR is configured in _client()
 
 
 def test_sources_lists_installed_books_with_toggle_state(tmp_path, monkeypatch):
@@ -157,6 +171,68 @@ def test_settings_page_reflects_current_values(tmp_path):
     resp = client.get("/settings")
     assert resp.status_code == 200
     assert 'value="lexical" checked' in resp.text
+
+
+def test_dashboard_shows_setup_banner_when_zim_dir_unset(tmp_path, monkeypatch):
+    client, _settings, _mgr = _client_no_zim_dir(tmp_path)
+    monkeypatch.setattr(admin, "_reachable", _fake_reachable)
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "Setup needed" in resp.text
+    assert "ZIM_DIR" in resp.text
+
+
+def test_settings_page_also_shows_setup_banner_when_zim_dir_unset(tmp_path):
+    client, _settings, _mgr = _client_no_zim_dir(tmp_path)
+
+    resp = client.get("/settings")
+    assert resp.status_code == 200
+    assert "Setup needed" in resp.text
+
+
+def test_catalog_page_disables_download_when_zim_dir_unset(tmp_path, monkeypatch):
+    client, _settings, _mgr = _client_no_zim_dir(tmp_path)
+
+    async def fake_search(query="", lang="", count=30):
+        return [
+            CatalogEntry(
+                uuid="u1",
+                name="devdocs_python",
+                title="Python Docs",
+                description="",
+                language="eng",
+                category="other",
+                tags="_ftindex:yes",
+                article_count=100,
+                media_count=0,
+                updated="",
+                size_bytes=1024,
+                download_url="https://example.org/devdocs_python.zim",
+                has_fulltext_index=True,
+            )
+        ]
+
+    monkeypatch.setattr(admin.catalog_client, "search_catalog", fake_search)
+    resp = client.get("/catalog", params={"q": "python"})
+    assert resp.status_code == 200
+    assert "Python Docs" in resp.text
+    assert "set ZIM_DIR first" in resp.text
+    assert "<form method=\"post\" action=\"/sources/download\">" not in resp.text
+
+
+def test_sources_download_is_a_noop_without_zim_dir(tmp_path):
+    manager = DownloadManager(tmp_path / "unused")
+    client, _settings, mgr = _client_no_zim_dir(tmp_path, download_manager=manager)
+
+    resp = client.post(
+        "/sources/download",
+        data={"url": "https://example.org/foo.zim", "filename": "foo.zim"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/downloads"
+    assert mgr.list_jobs() == []
 
 
 def test_settings_update_changes_mode_and_rerank(tmp_path):

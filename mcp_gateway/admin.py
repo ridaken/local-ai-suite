@@ -55,6 +55,11 @@ button{cursor:pointer;padding:.25rem .6rem}
 input[type=text]{padding:.3rem .5rem;width:280px}
 .muted{opacity:.7;font-size:.85rem}
 .error{color:#e08f8f}
+.setup-banner{background:#4d431f;color:#f0e4b0;border-radius:.4rem;padding:.75rem 1rem;
+  margin-bottom:1.25rem}
+.setup-banner strong{display:block;margin-bottom:.35rem}
+.setup-banner ul{margin:.25rem 0 0;padding-left:1.2rem}
+.setup-banner code{background:rgba(255,255,255,.12);padding:0 .25rem;border-radius:.2rem}
 """
 
 
@@ -99,6 +104,29 @@ def _badge(status: str) -> str:
     return f'<span class="badge {cls}">{html.escape(status)}</span>'
 
 
+def _setup_issues(zim_dir_path: Path | None) -> list[str]:
+    """The one thing that actually blocks correct behavior when unset: without
+    a data directory, downloads have nowhere durable to land and never show up
+    as installed sources. Deliberately not a general "everything optional is
+    unset" nag list (blank KAGI_API_KEY / no vector tier already self-document
+    via their own tool responses and the dashboard's reachability badges)."""
+    if zim_dir_path is not None:
+        return []
+    return [
+        "No data directory is set (<code>ZIM_DIR</code>) — Catalog downloads have "
+        "nowhere durable to go until you set it. Add it to <code>config/.env</code> "
+        "(host mode) or the <code>gateway</code> service's environment in "
+        "<code>docker-compose.yml</code> (Docker), then restart the gateway."
+    ]
+
+
+def _setup_banner(issues: list[str]) -> str:
+    if not issues:
+        return ""
+    items = "".join(f"<li>{issue}</li>" for issue in issues)
+    return f'<div class="setup-banner"><strong>Setup needed</strong><ul>{items}</ul></div>'
+
+
 def build_admin_app(
     *,
     settings: SettingsStore,
@@ -107,6 +135,10 @@ def build_admin_app(
     library_xml_path: str,
 ) -> Starlette:
     zim_dir_path = Path(zim_dir) if zim_dir else None
+
+    def _render(title: str, body: str, *, extra_head: str = "") -> HTMLResponse:
+        banner = _setup_banner(_setup_issues(zim_dir_path))
+        return _page(title, banner + body, extra_head=extra_head)
 
     def _refresh_library() -> None:
         if zim_dir_path and library_xml_path:
@@ -142,7 +174,7 @@ def build_admin_app(
            &middot; reranking: <b>{"on" if settings.get_rerank_enabled() else "off"}</b>
            &middot; see <a href="/settings">Settings</a> to change.</p>
         """
-        return _page("Dashboard", body)
+        return _render("Dashboard", body)
 
     async def sources(request: Request) -> HTMLResponse:
         books = zim_library.scan_zim_dir(zim_dir_path) if zim_dir_path else []
@@ -186,7 +218,7 @@ def build_admin_app(
             else empty_note
         )
         body = f"<h2>Installed sources</h2>{table}"
-        return _page("Sources", body)
+        return _render("Sources", body)
 
     async def sources_toggle(request: Request) -> RedirectResponse:
         form = await request.form()
@@ -221,7 +253,9 @@ def build_admin_app(
                 elif e.has_fulltext_index is True:
                     fts_note = ' <span class="badge ok">full-text index</span>'
                 download_btn = ""
-                if e.download_url:
+                if e.download_url and zim_dir_path is None:
+                    download_btn = '<span class="muted">set ZIM_DIR first</span>'
+                elif e.download_url:
                     filename = e.download_url.rsplit("/", 1)[-1]
                     download_btn = (
                         '<form method="post" action="/sources/download">'
@@ -253,13 +287,13 @@ def build_admin_app(
         </form>
         {results_html}
         """
-        return _page("Catalog", body)
+        return _render("Catalog", body)
 
     async def sources_download(request: Request) -> RedirectResponse:
         form = await request.form()
         url = str(form.get("url", ""))
         filename = str(form.get("filename", ""))
-        if url and filename:
+        if url and filename and zim_dir_path is not None:
             download_manager.start(url, filename)
         return RedirectResponse("/downloads", status_code=303)
 
@@ -286,7 +320,7 @@ def build_admin_app(
             else "<p class='muted'>No downloads yet.</p>"
         )
         body = f"<h2>Downloads</h2>{table}"
-        return _page("Downloads", body, extra_head=refresh)
+        return _render("Downloads", body, extra_head=refresh)
 
     async def settings_page(request: Request) -> HTMLResponse:
         mode = settings.get_retrieval_mode()
@@ -315,7 +349,7 @@ def build_admin_app(
         <p class="muted">Per-book enable/disable lives on the
            <a href="/sources">Sources</a> page.</p>
         """
-        return _page("Settings", body)
+        return _render("Settings", body)
 
     async def settings_update(request: Request) -> RedirectResponse:
         form = await request.form()
