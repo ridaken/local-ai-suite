@@ -207,6 +207,9 @@ works exactly as in Phase 1/2 if you don't need this.
    this). From here:
    - **Sources** — see installed ZIMs (with article counts, size, and whether
      they have a full-text index), enable/disable them per-book, delete them.
+   - **Recommended** — start from a curated set of useful ZIMs (Wikipedia,
+     Stack Overflow, Python docs, and web docs). The gateway resolves current
+     catalog matches, then downloads through the normal queue.
    - **Catalog** — search the Kiwix OPDS catalog and download a ZIM straight
      into `ZIM_DIR`; downloads are resumable and picked up by kiwix with no
      restart (`--library --monitorLibrary`).
