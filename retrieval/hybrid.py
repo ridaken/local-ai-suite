@@ -85,10 +85,11 @@ async def hybrid_search(
     top_k = top_k or config.KB_SEARCH_LIMIT
     settings = settings or default_store()
     mode = settings.get_retrieval_mode()  # "hybrid" | "lexical" | "vector"
+    vector_enabled = config.vector_tier_enabled()
     candidates: list[Candidate] = []
     notes: list[str] = []
 
-    if mode in ("hybrid", "vector") and config.vector_tier_enabled():
+    if mode in ("hybrid", "vector") and vector_enabled:
         try:
             candidates += await _vector_candidates(query, embed_fn or embed_query, client)
         except Exception as exc:  # noqa: BLE001 - degrade gracefully across any failure
@@ -110,7 +111,7 @@ async def hybrid_search(
 
     candidates = _dedup(candidates)
 
-    rerank_enabled = settings.get_rerank_enabled()
+    rerank_enabled = settings.get_rerank_enabled() and vector_enabled
     reranked = await _maybe_rerank(
         query, candidates, top_k, rerank_fn or rerank, notes, enabled=rerank_enabled
     )

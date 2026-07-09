@@ -138,6 +138,29 @@ def test_lexical_mode_skips_vector_tier(monkeypatch, tmp_path):
     assert result.candidates == []
 
 
+def test_vector_tier_disabled_skips_reranker(monkeypatch, tmp_path):
+    async def lexical_hit(_q, _n, books=None):
+        from retrieval.lexical import Hit
+
+        return [Hit(title="Kiwix", url="http://kiwix/a", snippet="lexical result")]
+
+    async def boom_rerank(_query, _documents, _top_n):
+        raise AssertionError("reranker should not be queried when vector tier is disabled")
+
+    monkeypatch.setattr(hybrid, "kiwix_search", lexical_hit)
+    monkeypatch.setattr(hybrid.config, "QDRANT_URL", "")
+
+    result = asyncio.run(
+        hybrid_search(
+            "anything",
+            top_k=5,
+            rerank_fn=boom_rerank,
+            settings=SettingsStore(tmp_path / "settings.db"),
+        )
+    )
+    assert [c.source for c in result.candidates] == ["kb"]
+
+
 def test_vector_mode_skips_lexical_tier(monkeypatch, tmp_path):
     async def boom_kiwix(_q, _n, books=None):
         raise AssertionError("lexical tier should not be queried in vector mode")
