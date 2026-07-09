@@ -93,3 +93,7 @@ def test_parse_catalog_feed_empty_feed():
     empty = b"""<?xml version="1.0"?>
     <feed xmlns="http://www.w3.org/2005/Atom"><title>Empty</title></feed>"""
     assert parse_catalog_feed(empty) == []
+
+
+def test_parse_catalog_feed_malformed_xml_returns_empty_list():
+    assert parse_catalog_feed(b"<html>upstream error") == []

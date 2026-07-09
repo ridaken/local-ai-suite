@@ -27,6 +27,13 @@ from . import config
 _CHUNK_SIZE = 1024 * 1024
 
 
+def _safe_zim_filename(filename: str) -> str:
+    name = Path(filename).name
+    if name != filename or not name or name in (".", "..") or not name.endswith(".zim"):
+        raise ValueError("filename must be a safe .zim basename")
+    return name
+
+
 @dataclass
 class DownloadJob:
     job_id: str
@@ -64,11 +71,12 @@ class DownloadManager:
         return self._jobs.get(job_id)
 
     def start(self, url: str, filename: str) -> DownloadJob:
+        safe_filename = _safe_zim_filename(filename)
         job = DownloadJob(
             job_id=uuid.uuid4().hex[:12],
             url=url,
-            filename=filename,
-            dest_path=self.zim_dir / filename,
+            filename=safe_filename,
+            dest_path=self.zim_dir / safe_filename,
         )
         self._jobs[job.job_id] = job
         self._tasks[job.job_id] = asyncio.create_task(self._run(job))
@@ -90,7 +98,7 @@ class DownloadManager:
     async def _run(self, job: DownloadJob) -> None:
         self.zim_dir.mkdir(parents=True, exist_ok=True)
         part_path = job.dest_path.with_name(job.dest_path.name + ".part")
-        resume_from = part_path.stat().st_size if part_path.exists() else 0
+        resume_from = await asyncio.to_thread(_file_size_or_zero, part_path)
         headers = {"User-Agent": config.USER_AGENT}
         if resume_from:
             headers["Range"] = f"bytes={resume_from}-"
@@ -112,12 +120,12 @@ class DownloadManager:
                     resume_from = 0
                     job.downloaded_bytes = 0
 
-                with open(part_path, mode) as f:
-                    async for chunk in resp.aiter_bytes(chunk_size=_CHUNK_SIZE):
-                        f.write(chunk)
-                        job.downloaded_bytes += len(chunk)
+                async for chunk in resp.aiter_bytes(chunk_size=_CHUNK_SIZE):
+                    await asyncio.to_thread(_append_chunk, part_path, mode, chunk)
+                    mode = "ab"
+                    job.downloaded_bytes += len(chunk)
 
-            os.replace(part_path, job.dest_path)
+            await asyncio.to_thread(os.replace, part_path, job.dest_path)
             job.status = "done"
             if self._on_complete:
                 self._on_complete()
@@ -129,11 +137,20 @@ class DownloadManager:
             job.error = f"{type(exc).__name__}: {exc}"
 
 
+def _file_size_or_zero(path: Path) -> int:
+    return path.stat().st_size if path.exists() else 0
+
+
+def _append_chunk(path: Path, mode: str, chunk: bytes) -> None:
+    with open(path, mode) as f:
+        f.write(chunk)
+
+
 def delete_zim(
     zim_dir: str | Path, filename: str, *, on_complete: Callable[[], None] | None = None
 ) -> bool:
     """Delete an installed ZIM. Returns False if it wasn't there."""
-    path = Path(zim_dir) / filename
+    path = Path(zim_dir) / _safe_zim_filename(filename)
     if not path.exists():
         return False
     path.unlink()

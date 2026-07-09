@@ -95,7 +95,10 @@ def _parse_entry(entry: ET.Element) -> CatalogEntry:
 
 
 def parse_catalog_feed(xml_bytes: bytes) -> list[CatalogEntry]:
-    root = ET.fromstring(xml_bytes)
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return []
     return [_parse_entry(entry) for entry in root.findall("atom:entry", _NS)]
 
 

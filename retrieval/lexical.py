@@ -47,6 +47,9 @@ async def kiwix_search(query: str, limit: int, books: list[str] | None = None) -
     omitted, falls back to the single-book KIWIX_BOOK filter from config (or no
     filter at all).
     """
+    if books == []:
+        return []
+
     params: dict[str, str | list[str]] = {
         "pattern": query,
         "pageLength": str(limit),

@@ -5,6 +5,7 @@ deterministic."""
 import asyncio
 
 import httpx
+import pytest
 
 from mcp_gateway.downloads import DownloadManager, delete_zim
 
@@ -88,6 +89,25 @@ def test_fresh_download_writes_full_content(tmp_path):
     assert "Range" not in calls[0]
 
 
+def test_start_rejects_path_traversal_filename(tmp_path):
+    manager = DownloadManager(tmp_path, http_client_factory=_factory(lambda headers: None))
+
+    with pytest.raises(ValueError):
+        manager.start("http://example/foo.zim", "../state.db")
+
+    assert manager.list_jobs() == []
+    assert not (tmp_path.parent / "state.db").exists()
+
+
+def test_start_rejects_non_zim_filename(tmp_path):
+    manager = DownloadManager(tmp_path, http_client_factory=_factory(lambda headers: None))
+
+    with pytest.raises(ValueError):
+        manager.start("http://example/foo.txt", "foo.txt")
+
+    assert manager.list_jobs() == []
+
+
 def test_resume_continues_from_partial_file(tmp_path):
     first_half = b"AAAA"
     second_half = b"BBBB"
@@ -129,6 +149,26 @@ def test_delete_zim_removes_file_and_notifies(tmp_path):
     assert delete_zim(tmp_path, "foo.zim", on_complete=lambda: completed.append(True)) is True
     assert not target.exists()
     assert completed == [True]
+
+
+def test_delete_zim_rejects_path_traversal_filename(tmp_path):
+    outside = tmp_path.parent / "settings.db"
+    outside.write_bytes(b"data")
+
+    with pytest.raises(ValueError):
+        delete_zim(tmp_path, "../settings.db")
+
+    assert outside.exists()
+
+
+def test_delete_zim_rejects_non_zim_filename(tmp_path):
+    target = tmp_path / "settings.db"
+    target.write_bytes(b"data")
+
+    with pytest.raises(ValueError):
+        delete_zim(tmp_path, "settings.db")
+
+    assert target.exists()
 
 
 def test_delete_zim_missing_file_returns_false(tmp_path):

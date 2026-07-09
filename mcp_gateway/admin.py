@@ -232,7 +232,10 @@ def build_admin_app(
         form = await request.form()
         filename = str(form.get("filename", ""))
         if filename and zim_dir_path:
-            delete_zim(zim_dir_path, filename, on_complete=_refresh_library)
+            try:
+                delete_zim(zim_dir_path, filename, on_complete=_refresh_library)
+            except ValueError:
+                pass
         return RedirectResponse("/sources", status_code=303)
 
     async def catalog_page(request: Request) -> HTMLResponse:
@@ -294,7 +297,10 @@ def build_admin_app(
         url = str(form.get("url", ""))
         filename = str(form.get("filename", ""))
         if url and filename and zim_dir_path is not None:
-            download_manager.start(url, filename)
+            try:
+                download_manager.start(url, filename)
+            except ValueError:
+                pass
         return RedirectResponse("/downloads", status_code=303)
 
     async def downloads_page(request: Request) -> HTMLResponse:
