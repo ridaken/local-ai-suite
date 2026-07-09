@@ -17,6 +17,13 @@ Decisions captured from the design discussion:
 - **Domain priority**: coding/technical first; general, medical, and academic
   roughly equal after that.
 - **Single unified MCP gateway** shared by all clients.
+- **Deployment target**: the suite runs **co-located on the Windows inference
+  PC** (Proxmox considered and rejected — llama-server lives on the Windows
+  box, so co-location keeps embed/rerank a localhost hop). All containers are
+  CPU-only; llama-server owns the GPU on the host. No GPU passthrough anywhere.
+- **Ease of setup + maintenance** via a web **management plane** (Phase 3): the
+  gateway becomes a compose service with an admin UI — *not* a mega-container
+  bundling kiwix/qdrant (those stay upstream images for clean upgrades).
 
 Guiding principle (the thing that makes this work): **tiered retrieval, not
 pre-vectorizing the world.** Cheap full-text first stage (Kiwix/ZIM) → embed +
@@ -244,7 +251,7 @@ need emerges; the hybrid logic is ~one module.
 
 ## Build order (phased)
 
-### Phase 1 — MVP: local Wikipedia + online APIs (no vector stack)
+### Phase 1 (done) — MVP: local Wikipedia + online APIs (no vector stack)
 Local Wikipedia is Kiwix full-text search, which needs **no embeddings**, so this
 phase skips Qdrant/embed/rerank entirely and still delivers a working, useful hub.
 1. Repo skeleton + `docker-compose` for **kiwix-serve only**; `config/.env` with
@@ -254,7 +261,7 @@ phase skips Qdrant/embed/rerank entirely and still delivers a working, useful hu
 3. Client wiring: connect **pi** (native MCP); run **mcpo** and register the
    OpenAPI URL in **OpenWebUI**. Confirm both can call the tools + get cited answers.
 
-### Phase 2 — semantic search over your own data
+### Phase 2 (done) — semantic search over your own data
 4. Inference endpoints: bge-m3 embed + bge-reranker-v2-m3 on llama-server; smoke-test.
 5. Add **Qdrant** to compose; `retrieval/hybrid.py` upgrades `kb_search` to hybrid
    (Kiwix FTS + Qdrant → rerank → top-k with provenance).
@@ -262,11 +269,53 @@ phase skips Qdrant/embed/rerank entirely and still delivers a working, useful hu
    repos/notes/docs; register `refresh.ps1` with Task Scheduler.
 7. Add coding ZIMs (StackOverflow, DevDocs) to the Kiwix library.
 
-### Phase 3 — extras (opt-in, independent)
-8. SearXNG (if replacing/augmenting Kagi); `wolfram`, `units`, `datetime` tools.
-9. Geospatial/routing subsystem + `route` tool (Valhalla/OSRM + GeoNames).
-10. Skills/prompts: retrieval-and-verify pattern (cite sources; cross-check web
+### Phase 3 (done) — management plane: HTTP gateway + admin web UI
+Goal: ease of setup and day-to-day maintenance — `docker compose up` brings up
+the whole stack *plus* a local config/status page; no hand-editing `.env` for
+routine operation. Scope for v1: **sources + toggles** (the corpus-builder UI is
+deferred — see Phase 4+).
+
+Shape: the gateway becomes a **third compose service** (own small image). One
+Python process, two surfaces mounted in one Starlette/FastAPI app:
+- `/mcp` — MCP over **streamable HTTP** (pi and mcpo re-point here; stdio stays
+  the default transport for non-docker use via the existing `LAS_TRANSPORT`).
+- `/` — admin UI (server-rendered + htmx, **no build chain**) + REST API.
+
+8. **Gateway service**: Dockerfile + compose entry (bind-mount `ZIM_DIR` rw for
+   downloads, settings/state volume); HTTP transport path in `server.py`
+   mounting FastMCP's ASGI app alongside the admin routes.
+9. **Settings store** (sqlite, beside `state.db`): runtime toggles read live per
+   request — enabled ZIM books / Qdrant collections, retrieval mode
+   (hybrid / lexical-only / vector-only), candidate counts, rerank on/off,
+   result limits. `.env` keeps **secrets + paths only**; the store owns runtime
+   behavior. Crisp split, documented.
+10. **kb_search honors the store**: lexical tier passes only enabled books
+    (`books.name=` filters on kiwix `/search`); vector tier queries only
+    enabled collections; the mode toggle short-circuits whole tiers (the
+    degradation paths in `retrieval/hybrid.py` already support this).
+11. **Source management**: OPDS catalog client (`library.kiwix.org/catalog/v2`)
+    to browse/search available ZIMs; background **download manager**
+    (resumable, progress, writes to `ZIM_DIR`); delete. Switch kiwix-serve from
+    the `*.zim` glob to `library.xml` + `--monitorLibrary`, generating library
+    entries via `python-libzim`, so add/remove **hot-reloads without restarting
+    the kiwix container** (avoids mounting the docker socket). Fallback if
+    libzim fights us: documented one-line restart.
+12. **Admin pages**: dashboard (health of kiwix/qdrant/embedder/reranker, disk
+    usage of `ZIM_DIR`); sources (installed ZIMs + catalog + download queue);
+    collections (list / toggle / drop); retrieval settings.
+13. **Security posture**: bind admin + `/mcp` to `127.0.0.1` by default (LAN
+    exposure is a documented opt-in). Management is **human-only** — never
+    exposed as MCP tools; the model must not reconfigure its own KB.
+
+### Phase 4 — extras (opt-in, independent)
+14. SearXNG (if replacing/augmenting Kagi); `wolfram`, `units`, `datetime` tools.
+15. Geospatial/routing subsystem + `route` tool (Valhalla/OSRM + GeoNames).
+16. Skills/prompts: retrieval-and-verify pattern (cite sources; cross-check web
     claims against the local KB — your "second opinion").
+17. *(later)* **Corpus builder** in the admin UI: build a custom KB from a folder
+    of documents — a front end over the existing ingest pipeline
+    (chunk → embed → Qdrant) plus text extraction (PDF etc.) and a job/progress
+    view.
 
 ---
 
@@ -295,8 +344,28 @@ phase skips Qdrant/embed/rerank entirely and still delivers a working, useful hu
 - Cross-check test: a question where web and KB might disagree → confirm the
   model can call both and reconcile.
 
+**Phase 3 acceptance gate (management plane):**
+- `docker compose up` → kiwix + qdrant + **gateway**; `/` shows the dashboard;
+  an MCP inspector (or pi) lists the 5 tools at `/mcp` over HTTP.
+- Download a small DevDocs ZIM from the UI → it appears in kiwix **without a
+  manual restart** → `kb_search` returns hits from it.
+- Disable that book in the UI → the next `kb_search` excludes it; re-enable →
+  hits return. Toggle lexical-only vs hybrid → the vector tier is provably
+  skipped (log/trace).
+- Delete the ZIM in the UI → file removed from `ZIM_DIR`, kiwix library updated.
+- pi re-wired to the HTTP transport → cited end-to-end answers still work;
+  stdio launch still works for non-docker use.
+- `ruff` + `pytest` green — settings store, allowlist filtering, OPDS catalog
+  parsing, and download-resume logic are all unit-testable with mocked
+  httpx / in-memory sqlite (same pattern as the Phase 2 tests).
+
 ## Open considerations (decide during build)
 - Exact ZIM set + total disk budget for `zim/` (StackOverflow alone is tens of GB).
 - Whether to add `llama-swap` now or only once GPU contention appears.
 - Sandboxing approach for `python_exec` (subprocess + resource limits vs. a
   container) — start restrictive.
+- Phase 3 verify-early items: `python-libzim` wheel works in the gateway image
+  for generating `library.xml` entries; kiwix-serve `--monitorLibrary` behavior
+  on bind-mounted volumes under Docker Desktop; exact pi config shape for a
+  streamable-HTTP MCP server; `mcpo` flag for connecting to an HTTP MCP server
+  (vs launching a stdio command).

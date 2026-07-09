@@ -37,10 +37,24 @@ def _absolute(url: str) -> str:
     return f"{config.KIWIX_URL}/{url.lstrip('/')}"
 
 
-async def kiwix_search(query: str, limit: int) -> list[Hit]:
-    """Query kiwix-serve full-text search. Raises httpx.HTTPError if unreachable."""
-    params = {"pattern": query, "pageLength": str(limit), "format": "xml"}
-    if config.KIWIX_BOOK:
+async def kiwix_search(query: str, limit: int, books: list[str] | None = None) -> list[Hit]:
+    """Query kiwix-serve full-text search. Raises httpx.HTTPError if unreachable.
+
+    `books`, when given, restricts the search to those book names (repeated
+    `books.name=` params — libkiwix's InternalServer collects every value via
+    `get_arguments`, so this searches the union of the listed books). This is
+    how the admin UI's per-book enable/disable toggle takes effect. When
+    omitted, falls back to the single-book KIWIX_BOOK filter from config (or no
+    filter at all).
+    """
+    params: dict[str, str | list[str]] = {
+        "pattern": query,
+        "pageLength": str(limit),
+        "format": "xml",
+    }
+    if books is not None:
+        params["books.name"] = books
+    elif config.KIWIX_BOOK:
         params["books.name"] = config.KIWIX_BOOK
 
     async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True) as client:
