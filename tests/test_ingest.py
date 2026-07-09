@@ -9,7 +9,7 @@ from pathlib import Path
 
 from qdrant_client import QdrantClient
 
-from ingest.ingest import Source, run_ingest
+from ingest.ingest import Source, _iter_files, run_ingest
 
 DIM = 8
 
@@ -73,3 +73,19 @@ def test_deleted_file_removes_its_chunks(tmp_path):
     result = _ingest(tmp_path, client)
     assert result["deleted"] == 1
     assert client.count("test").count < total
+
+
+def test_default_excludes_skip_nested_internal_dirs(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "nested" / ".git" / "objects").mkdir(parents=True)
+    (tmp_path / "nested" / ".git" / "objects" / "blob.py").write_text(
+        "print('skip')\n", encoding="utf-8"
+    )
+    (tmp_path / "pkg" / "node_modules" / "dep").mkdir(parents=True)
+    (tmp_path / "pkg" / "node_modules" / "dep" / "index.py").write_text(
+        "print('skip')\n", encoding="utf-8"
+    )
+
+    files = _iter_files(Source(root=tmp_path, label="proj", include=["**/*.py"]))
+    assert [display for display, _ in files] == ["proj/src/app.py"]

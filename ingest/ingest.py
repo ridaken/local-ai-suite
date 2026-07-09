@@ -31,7 +31,7 @@ from .chunking import chunk_file
 
 EmbedTextsFn = Callable[[list[str]], Awaitable[list[list[float]]]]
 
-_DEFAULT_EXCLUDES = ["*/.git/*", "*/.venv/*", "*/node_modules/*", "*/__pycache__/*"]
+_DEFAULT_EXCLUDE_DIRS = {".git", ".venv", "node_modules", "__pycache__"}
 _MAX_FILE_BYTES = 1_000_000
 
 
@@ -61,15 +61,16 @@ def load_sources(sources_path: Path) -> list[Source]:
 
 def _iter_files(source: Source) -> list[tuple[str, Path]]:
     """Yield (display_path, abs_path) for files matching the source's patterns."""
-    excludes = _DEFAULT_EXCLUDES + source.exclude
     seen: dict[str, Path] = {}
     for pattern in source.include:
         for path in source.root.rglob(pattern):
             if not path.is_file():
                 continue
             rel = path.relative_to(source.root).as_posix()
+            if any(part in _DEFAULT_EXCLUDE_DIRS for part in path.relative_to(source.root).parts):
+                continue
             posix = path.as_posix()
-            if any(fnmatch.fnmatch(posix, e) or fnmatch.fnmatch(rel, e) for e in excludes):
+            if any(fnmatch.fnmatch(posix, e) or fnmatch.fnmatch(rel, e) for e in source.exclude):
                 continue
             display = f"{source.label}/{rel}"
             seen[display] = path

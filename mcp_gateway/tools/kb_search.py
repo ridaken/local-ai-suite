@@ -13,8 +13,10 @@ from retrieval.hybrid import Candidate, hybrid_search
 from .. import config
 
 
-def _format(query: str, candidates: list[Candidate]) -> str:
+def _format(query: str, candidates: list[Candidate], warning: str | None = None) -> str:
     lines = [f'Knowledge base results for "{query}":', ""]
+    if warning:
+        lines += [f"Warning: partial results ({warning}).", ""]
     for i, c in enumerate(candidates, start=1):
         snippet = c.text if len(c.text) <= 400 else c.text[:397] + "..."
         lines.append(f"{i}. [{c.source}] {c.title}")
@@ -40,4 +42,4 @@ async def kb_search(query: str, limit: int | None = None) -> str:
                 f"the embedder are reachable."
             )
         return f'No knowledge-base results for "{query}".'
-    return _format(query, result.candidates)
+    return _format(query, result.candidates, result.warning)

@@ -121,7 +121,7 @@ def _chunk_class(path: str, lines: list[str], node: ast.ClassDef, text: str) -> 
     # Large class: one chunk per method, plus a header chunk for the class body top.
     chunks: list[Chunk] = []
     methods = [n for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    header_end = (methods[0].lineno - 1) if methods else end
+    header_end = (_def_start(methods[0]) - 1) if methods else end
     header = _slice(lines, start, header_end)
     if header.strip():
         chunks.append(Chunk(path, "python", f"{node.name} (header)", start, header_end, header))

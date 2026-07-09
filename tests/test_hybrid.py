@@ -89,6 +89,29 @@ def test_hybrid_reports_error_when_all_tiers_fail(monkeypatch, tmp_path):
     assert result.error is not None
 
 
+def test_hybrid_warns_when_one_tier_fails_but_results_survive(monkeypatch, tmp_path):
+    async def boom_kiwix(_q, _n, books=None):
+        raise ValueError("bad xml")
+
+    monkeypatch.setattr(hybrid, "kiwix_search", boom_kiwix)
+
+    settings = SettingsStore(tmp_path / "settings.db")
+    settings.set_rerank_enabled(False)
+    client = _seed_client()
+    result = asyncio.run(
+        hybrid_search(
+            "anything",
+            top_k=5,
+            embed_fn=fake_embed,
+            client=client,
+            settings=settings,
+        )
+    )
+    assert result.candidates
+    assert result.error is None
+    assert result.warning == "knowledge base unavailable (ValueError)"
+
+
 def test_lexical_mode_skips_vector_tier(monkeypatch, tmp_path):
     async def no_kiwix(_q, _n, books=None):
         return []

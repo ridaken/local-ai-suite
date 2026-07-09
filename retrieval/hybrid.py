@@ -14,8 +14,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-import httpx
-
 from mcp_gateway import config, zim_library
 from mcp_gateway.settings_store import SettingsStore, default_store
 
@@ -54,6 +52,7 @@ class Candidate:
 class HybridResult:
     candidates: list[Candidate]
     error: str | None = None
+    warning: str | None = None
 
 
 async def _vector_candidates(query: str, embed_fn: EmbedFn, client) -> list[Candidate]:
@@ -103,7 +102,7 @@ async def hybrid_search(
                 Candidate(title=h.title, text=h.snippet or h.title, citation=h.url, source="kb")
                 for h in hits
             ]
-        except httpx.HTTPError as exc:
+        except Exception as exc:  # noqa: BLE001 - degrade across bad responses too
             notes.append(f"knowledge base unavailable ({type(exc).__name__})")
 
     if not candidates:
@@ -115,7 +114,7 @@ async def hybrid_search(
     reranked = await _maybe_rerank(
         query, candidates, top_k, rerank_fn or rerank, notes, enabled=rerank_enabled
     )
-    return HybridResult(reranked[:top_k], error=None)
+    return HybridResult(reranked[:top_k], error=None, warning="; ".join(notes) or None)
 
 
 def _dedup(candidates: list[Candidate]) -> list[Candidate]:

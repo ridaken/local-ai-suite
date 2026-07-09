@@ -1,6 +1,7 @@
 """Tests for code-aware chunking."""
 
 from ingest.chunking import Chunk, chunk_file, language_for
+from mcp_gateway import config
 
 PY = '''\
 import os
@@ -64,3 +65,25 @@ def test_generic_chunking_splits_long_text():
     # line ranges are ordered and contiguous-ish (overlap allowed)
     assert chunks[0].start_line == 1
     assert chunks[-1].end_line == 200
+
+
+def test_large_class_method_decorators_stay_with_method(monkeypatch):
+    monkeypatch.setattr(config, "CHUNK_MAX_CHARS", 80)
+    text = '''\
+class Widget:
+    kind = "demo"
+
+    @classmethod
+    def build(cls):
+        return cls()
+
+    def other(self):
+        return 1
+'''
+
+    chunks = chunk_file("pkg/widget.py", text)
+    header = next(c for c in chunks if c.symbol == "Widget (header)")
+    method = next(c for c in chunks if c.symbol == "Widget.build")
+    assert "@classmethod" not in header.text
+    assert method.start_line == 4
+    assert method.text.startswith("    @classmethod")
