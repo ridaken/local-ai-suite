@@ -8,6 +8,7 @@ from starlette.testclient import TestClient
 from mcp_gateway import admin
 from mcp_gateway.catalog import CatalogEntry
 from mcp_gateway.downloads import DownloadManager
+from mcp_gateway.recommendations import Recommendation, ResolvedRecommendation
 from mcp_gateway.settings_store import SettingsStore
 from mcp_gateway.zim_library import BookInfo
 
@@ -136,6 +137,126 @@ def test_catalog_page_handles_unreachable_catalog(tmp_path, monkeypatch):
     assert "unreachable" in resp.text.lower() or "ConnectError" in resp.text
 
 
+def test_recommendations_page_shows_download_buttons(tmp_path, monkeypatch):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+    rec = Recommendation(
+        key="devdocs-python",
+        label="Python documentation",
+        rationale="Compact Python reference docs.",
+        query="devdocs python",
+    )
+    entry = CatalogEntry(
+        uuid="u1",
+        name="devdocs_python",
+        title="Python Docs",
+        description="",
+        language="eng",
+        category="devdocs",
+        tags="_ftindex:yes",
+        article_count=100,
+        media_count=0,
+        updated="",
+        size_bytes=1024,
+        download_url="https://example.org/devdocs_python.zim",
+        has_fulltext_index=True,
+    )
+
+    async def fake_resolve_recommendations():
+        return [ResolvedRecommendation(recommendation=rec, entry=entry)]
+
+    monkeypatch.setattr(
+        admin.recommendations, "resolve_recommendations", fake_resolve_recommendations
+    )
+    monkeypatch.setattr(admin.zim_library, "scan_zim_dir", lambda _dir: [])
+
+    resp = client.get("/recommendations")
+
+    assert resp.status_code == 200
+    assert "Python documentation" in resp.text
+    assert "Python Docs" in resp.text
+    assert "Download" in resp.text
+
+
+def test_recommendations_page_marks_installed_zim(tmp_path, monkeypatch):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+    rec = Recommendation(
+        key="devdocs-python",
+        label="Python documentation",
+        rationale="Compact Python reference docs.",
+        query="devdocs python",
+    )
+    entry = CatalogEntry(
+        uuid="u1",
+        name="devdocs_python",
+        title="Python Docs",
+        description="",
+        language="eng",
+        category="devdocs",
+        tags="_ftindex:yes",
+        article_count=100,
+        media_count=0,
+        updated="",
+        size_bytes=1024,
+        download_url="https://example.org/devdocs_python.zim",
+        has_fulltext_index=True,
+    )
+    installed = [
+        BookInfo(filename="devdocs_python.zim", name="devdocs_python", uuid="u1", title="Python")
+    ]
+
+    async def fake_resolve_recommendations():
+        return [ResolvedRecommendation(recommendation=rec, entry=entry)]
+
+    monkeypatch.setattr(
+        admin.recommendations, "resolve_recommendations", fake_resolve_recommendations
+    )
+    monkeypatch.setattr(admin.zim_library, "scan_zim_dir", lambda _dir: installed)
+
+    resp = client.get("/recommendations")
+
+    assert resp.status_code == 200
+    assert "installed" in resp.text
+    assert "<button type=\"submit\">Download</button>" not in resp.text
+
+
+def test_recommendations_page_disables_download_when_zim_dir_unset(tmp_path, monkeypatch):
+    client, _settings, _mgr = _client_no_zim_dir(tmp_path)
+    rec = Recommendation(
+        key="devdocs-python",
+        label="Python documentation",
+        rationale="Compact Python reference docs.",
+        query="devdocs python",
+    )
+    entry = CatalogEntry(
+        uuid="u1",
+        name="devdocs_python",
+        title="Python Docs",
+        description="",
+        language="eng",
+        category="devdocs",
+        tags="_ftindex:yes",
+        article_count=100,
+        media_count=0,
+        updated="",
+        size_bytes=1024,
+        download_url="https://example.org/devdocs_python.zim",
+        has_fulltext_index=True,
+    )
+
+    async def fake_resolve_recommendations():
+        return [ResolvedRecommendation(recommendation=rec, entry=entry)]
+
+    monkeypatch.setattr(
+        admin.recommendations, "resolve_recommendations", fake_resolve_recommendations
+    )
+
+    resp = client.get("/recommendations")
+
+    assert resp.status_code == 200
+    assert "set ZIM_DIR first" in resp.text
+    assert "<form method=\"post\" action=\"/sources/download\">" not in resp.text
+
+
 def test_sources_download_registers_a_job(tmp_path):
     class _StuckClient:
         async def __aenter__(self):
@@ -161,6 +282,36 @@ def test_sources_download_registers_a_job(tmp_path):
     assert len(jobs) == 1
     assert jobs[0].filename == "foo.zim"
     assert jobs[0].url == "https://example.org/foo.zim"
+
+
+def test_recommendation_download_registers_a_job(tmp_path):
+    class _StuckClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, method, url, headers=None):
+            raise AssertionError("not reached in this test")
+
+    manager = DownloadManager(tmp_path / "zim", http_client_factory=lambda: _StuckClient())
+    client, _settings, mgr, _zd = _client(tmp_path, download_manager=manager)
+
+    resp = client.post(
+        "/sources/download",
+        data={
+            "url": "https://example.org/devdocs_python.zim",
+            "filename": "devdocs_python.zim",
+        },
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/downloads"
+    jobs = mgr.list_jobs()
+    assert len(jobs) == 1
+    assert jobs[0].filename == "devdocs_python.zim"
 
 
 def test_settings_page_reflects_current_values(tmp_path):

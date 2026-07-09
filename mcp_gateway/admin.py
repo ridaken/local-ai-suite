@@ -23,13 +23,15 @@ from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.routing import Route
 
 from . import catalog as catalog_client
-from . import config, zim_library
+from . import config, recommendations, zim_library
+from .catalog import CatalogEntry
 from .downloads import DownloadManager, delete_zim
 from .settings_store import SettingsStore
 
 _NAV = [
     ("/", "Dashboard"),
     ("/sources", "Sources"),
+    ("/recommendations", "Recommended"),
     ("/catalog", "Catalog"),
     ("/downloads", "Downloads"),
     ("/settings", "Settings"),
@@ -102,6 +104,28 @@ async def _reachable(url: str) -> str:
 def _badge(status: str) -> str:
     cls = {"reachable": "ok", "unreachable": "down"}.get(status, "warn")
     return f'<span class="badge {cls}">{html.escape(status)}</span>'
+
+
+def _fulltext_badge(has_fulltext_index: bool | None) -> str:
+    if has_fulltext_index is False:
+        return ' <span class="badge warn">no full-text index</span>'
+    if has_fulltext_index is True:
+        return ' <span class="badge ok">full-text index</span>'
+    return ""
+
+
+def _download_action(entry: CatalogEntry, zim_dir_path: Path | None) -> str:
+    if not entry.download_url:
+        return '<span class="muted">unavailable</span>'
+    if zim_dir_path is None:
+        return '<span class="muted">set ZIM_DIR first</span>'
+    filename = entry.download_url.rsplit("/", 1)[-1]
+    return (
+        '<form method="post" action="/sources/download">'
+        f'<input type="hidden" name="url" value="{html.escape(entry.download_url)}">'
+        f'<input type="hidden" name="filename" value="{html.escape(filename)}">'
+        '<button type="submit">Download</button></form>'
+    )
 
 
 def _setup_issues(zim_dir_path: Path | None) -> list[str]:
@@ -250,27 +274,12 @@ def build_admin_app(
                 entries = []
             rows = []
             for e in entries:
-                fts_note = ""
-                if e.has_fulltext_index is False:
-                    fts_note = ' <span class="badge warn">no full-text index</span>'
-                elif e.has_fulltext_index is True:
-                    fts_note = ' <span class="badge ok">full-text index</span>'
-                download_btn = ""
-                if e.download_url and zim_dir_path is None:
-                    download_btn = '<span class="muted">set ZIM_DIR first</span>'
-                elif e.download_url:
-                    filename = e.download_url.rsplit("/", 1)[-1]
-                    download_btn = (
-                        '<form method="post" action="/sources/download">'
-                        f'<input type="hidden" name="url" value="{html.escape(e.download_url)}">'
-                        f'<input type="hidden" name="filename" value="{html.escape(filename)}">'
-                        '<button type="submit">Download</button></form>'
-                    )
+                fts_note = _fulltext_badge(e.has_fulltext_index)
                 rows.append(
                     f"<tr><td>{html.escape(e.title)}<br>"
                     f'<span class="muted">{html.escape(e.name)} &middot; {e.language} &middot; '
                     f"{e.article_count:,} articles &middot; {_human_bytes(e.size_bytes)}</span>"
-                    f"{fts_note}</td><td>{download_btn}</td></tr>"
+                    f"{fts_note}</td><td>{_download_action(e, zim_dir_path)}</td></tr>"
                 )
             results_html = (
                 "<table><tr><th>Book</th><th>Action</th></tr>" + "".join(rows) + "</table>"
@@ -291,6 +300,53 @@ def build_admin_app(
         {results_html}
         """
         return _render("Catalog", body)
+
+    async def recommendations_page(request: Request) -> HTMLResponse:
+        installed = {
+            b.name
+            for b in (zim_library.scan_zim_dir(zim_dir_path) if zim_dir_path else [])
+            if b.metadata_error is None
+        }
+        resolved = await recommendations.resolve_recommendations()
+        rows = []
+        for item in resolved:
+            rec = item.recommendation
+            entry = item.entry
+            if entry is None:
+                detail = html.escape(item.error or "No downloadable catalog match found.")
+                rows.append(
+                    f"<tr><td>{html.escape(rec.label)}<br>"
+                    f'<span class="muted">{html.escape(rec.rationale)}</span></td>'
+                    f'<td><span class="error">{detail}</span></td>'
+                    '<td><span class="muted">unavailable</span></td></tr>'
+                )
+                continue
+
+            action = (
+                '<span class="badge ok">installed</span>'
+                if entry.name in installed
+                else _download_action(entry, zim_dir_path)
+            )
+            rows.append(
+                f"<tr><td>{html.escape(rec.label)}<br>"
+                f'<span class="muted">{html.escape(rec.rationale)}</span></td>'
+                f"<td>{html.escape(entry.title)}<br>"
+                f'<span class="muted">{html.escape(entry.name)} &middot; '
+                f"{html.escape(entry.language)} &middot; {entry.article_count:,} articles "
+                f"&middot; {_human_bytes(entry.size_bytes)}</span>"
+                f"{_fulltext_badge(entry.has_fulltext_index)}</td>"
+                f"<td>{action}</td></tr>"
+            )
+
+        body = (
+            "<h2>Recommended ZIMs</h2>"
+            '<p class="muted">Curated starter downloads are resolved through the Kiwix '
+            "catalog, then installed through the same download queue as Catalog results.</p>"
+            "<table><tr><th>Recommendation</th><th>Catalog match</th><th>Action</th></tr>"
+            + "".join(rows)
+            + "</table>"
+        )
+        return _render("Recommended", body)
 
     async def sources_download(request: Request) -> RedirectResponse:
         form = await request.form()
@@ -372,6 +428,7 @@ def build_admin_app(
             Route("/sources/toggle", sources_toggle, methods=["POST"]),
             Route("/sources/delete", sources_delete, methods=["POST"]),
             Route("/sources/download", sources_download, methods=["POST"]),
+            Route("/recommendations", recommendations_page),
             Route("/catalog", catalog_page),
             Route("/downloads", downloads_page),
             Route("/settings", settings_page),
