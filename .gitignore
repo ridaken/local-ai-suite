@@ -13,6 +13,7 @@ venv/
 zim/
 data/
 state.db
+settings.db
 
 # Editor
 .vscode/

@@ -16,7 +16,8 @@ from dataclasses import dataclass
 
 import httpx
 
-from mcp_gateway import config
+from mcp_gateway import config, zim_library
+from mcp_gateway.settings_store import SettingsStore, default_store
 
 from .embed import embed_query
 from .lexical import kiwix_search
@@ -25,6 +26,19 @@ from .rerank import rerank
 
 EmbedFn = Callable[[str], Awaitable[list[float]]]
 RerankFn = Callable[[str, list[str], int], Awaitable[list[tuple[int, float]]]]
+
+
+def _enabled_books(settings: SettingsStore) -> list[str] | None:
+    """Which kiwix book names the lexical tier should search, per the admin
+    UI's per-book toggle. None means "no filter" (pre-Phase-3 behavior,
+    including when library.xml hasn't been generated yet)."""
+    if not config.LIBRARY_XML_PATH:
+        return None
+    try:
+        installed = zim_library.installed_book_names(config.LIBRARY_XML_PATH)
+    except OSError:
+        return None
+    return settings.enabled_books(installed) if installed else None
 
 
 @dataclass
@@ -67,32 +81,40 @@ async def hybrid_search(
     embed_fn: EmbedFn | None = None,
     rerank_fn: RerankFn | None = None,
     client=None,
+    settings: SettingsStore | None = None,
 ) -> HybridResult:
     top_k = top_k or config.KB_SEARCH_LIMIT
+    settings = settings or default_store()
+    mode = settings.get_retrieval_mode()  # "hybrid" | "lexical" | "vector"
     candidates: list[Candidate] = []
     notes: list[str] = []
 
-    if config.vector_tier_enabled():
+    if mode in ("hybrid", "vector") and config.vector_tier_enabled():
         try:
             candidates += await _vector_candidates(query, embed_fn or embed_query, client)
         except Exception as exc:  # noqa: BLE001 - degrade gracefully across any failure
             notes.append(f"vector tier unavailable ({type(exc).__name__})")
 
-    try:
-        hits = await kiwix_search(query, config.HYBRID_KIWIX_CANDIDATES)
-        candidates += [
-            Candidate(title=h.title, text=h.snippet or h.title, citation=h.url, source="kb")
-            for h in hits
-        ]
-    except httpx.HTTPError as exc:
-        notes.append(f"knowledge base unavailable ({type(exc).__name__})")
+    if mode in ("hybrid", "lexical"):
+        try:
+            books = _enabled_books(settings)
+            hits = await kiwix_search(query, config.HYBRID_KIWIX_CANDIDATES, books=books)
+            candidates += [
+                Candidate(title=h.title, text=h.snippet or h.title, citation=h.url, source="kb")
+                for h in hits
+            ]
+        except httpx.HTTPError as exc:
+            notes.append(f"knowledge base unavailable ({type(exc).__name__})")
 
     if not candidates:
         return HybridResult([], error="; ".join(notes) or None)
 
     candidates = _dedup(candidates)
 
-    reranked = await _maybe_rerank(query, candidates, top_k, rerank_fn or rerank, notes)
+    rerank_enabled = settings.get_rerank_enabled()
+    reranked = await _maybe_rerank(
+        query, candidates, top_k, rerank_fn or rerank, notes, enabled=rerank_enabled
+    )
     return HybridResult(reranked[:top_k], error=None)
 
 
@@ -114,8 +136,10 @@ async def _maybe_rerank(
     top_k: int,
     rerank_fn: RerankFn,
     notes: list[str],
+    *,
+    enabled: bool = True,
 ) -> list[Candidate]:
-    if config.RERANK_URL:
+    if enabled and config.RERANK_URL:
         try:
             order = await rerank_fn(query, [c.text for c in candidates], top_k)
             return [candidates[i] for i, _ in order]
