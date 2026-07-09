@@ -125,6 +125,37 @@ def test_catalog_page_shows_download_button_for_available_entry(tmp_path, monkey
     assert "full-text index" in resp.text
 
 
+def test_catalog_page_escapes_entry_language(tmp_path, monkeypatch):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+
+    async def fake_search(query="", lang="", count=30):
+        return [
+            CatalogEntry(
+                uuid="u1",
+                name="devdocs_python",
+                title="Python Docs",
+                description="",
+                language='<script>alert("xss")</script>',
+                category="other",
+                tags="_ftindex:yes",
+                article_count=100,
+                media_count=0,
+                updated="",
+                size_bytes=1024,
+                download_url="https://example.org/devdocs_python.zim",
+                has_fulltext_index=True,
+            )
+        ]
+
+    monkeypatch.setattr(admin.catalog_client, "search_catalog", fake_search)
+
+    resp = client.get("/catalog", params={"q": "python"})
+
+    assert resp.status_code == 200
+    assert '<script>alert("xss")</script>' not in resp.text
+    assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in resp.text
+
+
 def test_catalog_page_handles_unreachable_catalog(tmp_path, monkeypatch):
     client, _settings, _mgr, _zim_dir = _client(tmp_path)
 

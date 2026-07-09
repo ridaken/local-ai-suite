@@ -2,11 +2,13 @@ import asyncio
 
 import httpx
 
+from mcp_gateway import recommendations
 from mcp_gateway.catalog import CatalogEntry
 from mcp_gateway.recommendations import (
     Recommendation,
     best_entry,
     resolve_recommendation,
+    resolve_recommendations,
 )
 
 
@@ -98,3 +100,27 @@ def test_resolve_recommendation_returns_unavailable_on_catalog_error():
     assert result.entry is None
     assert result.available is False
     assert "Catalog unreachable" in result.error
+
+
+def test_resolve_recommendations_runs_catalog_searches_concurrently(monkeypatch):
+    recs = (
+        Recommendation(key="one", label="One", rationale="", query="one"),
+        Recommendation(key="two", label="Two", rationale="", query="two"),
+    )
+    active = 0
+    max_active = 0
+
+    async def fake_search(query: str, lang: str, count: int):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return [_entry(query)]
+
+    monkeypatch.setattr(recommendations, "RECOMMENDATIONS", recs)
+
+    results = asyncio.run(resolve_recommendations(search_catalog=fake_search))
+
+    assert [result.recommendation.key for result in results] == ["one", "two"]
+    assert max_active == 2

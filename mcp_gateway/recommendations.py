@@ -7,6 +7,7 @@ library.xml and become searchable through kb_search.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -163,7 +164,9 @@ async def resolve_recommendations(
     *,
     search_catalog: SearchCatalog | None = None,
 ) -> list[ResolvedRecommendation]:
-    return [
-        await resolve_recommendation(recommendation, search_catalog=search_catalog)
-        for recommendation in RECOMMENDATIONS
-    ]
+    return await asyncio.gather(
+        *[
+            resolve_recommendation(recommendation, search_catalog=search_catalog)
+            for recommendation in RECOMMENDATIONS
+        ]
+    )

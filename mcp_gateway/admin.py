@@ -277,7 +277,8 @@ def build_admin_app(
                 fts_note = _fulltext_badge(e.has_fulltext_index)
                 rows.append(
                     f"<tr><td>{html.escape(e.title)}<br>"
-                    f'<span class="muted">{html.escape(e.name)} &middot; {e.language} &middot; '
+                    f'<span class="muted">{html.escape(e.name)} &middot; '
+                    f"{html.escape(e.language)} &middot; "
                     f"{e.article_count:,} articles &middot; {_human_bytes(e.size_bytes)}</span>"
                     f"{fts_note}</td><td>{_download_action(e, zim_dir_path)}</td></tr>"
                 )
