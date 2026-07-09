@@ -89,6 +89,7 @@ def build_app() -> Starlette:
     settings.streamable_http_path (default "/mcp").
     """
     settings = default_store()
+    config.apply_runtime_overrides(settings.config_values())
 
     def _refresh_library() -> None:
         if config.ZIM_DIR and config.LIBRARY_XML_PATH:

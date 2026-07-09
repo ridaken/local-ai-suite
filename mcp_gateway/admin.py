@@ -35,6 +35,7 @@ _NAV = [
     ("/catalog", "Catalog"),
     ("/downloads", "Downloads"),
     ("/settings", "Settings"),
+    ("/configuration", "Configuration"),
 ]
 
 _CSS = """
@@ -55,6 +56,9 @@ th,td{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #333;vertical-
 form.inline{display:inline}
 button{cursor:pointer;padding:.25rem .6rem}
 input[type=text]{padding:.3rem .5rem;width:280px}
+input[type=password],input[type=number]{padding:.3rem .5rem;width:280px}
+.config-input{width:100%;max-width:520px}
+.field-help{display:block;margin-top:.2rem}
 .muted{opacity:.7;font-size:.85rem}
 .error{color:#e08f8f}
 .setup-banner{background:#4d431f;color:#f0e4b0;border-radius:.4rem;padding:.75rem 1rem;
@@ -158,26 +162,39 @@ def build_admin_app(
     zim_dir: str,
     library_xml_path: str,
 ) -> Starlette:
-    zim_dir_path = Path(zim_dir) if zim_dir else None
+    initial_zim_dir = zim_dir
+    initial_library_xml_path = library_xml_path
+    config.apply_runtime_overrides(settings.config_values())
+
+    def _zim_dir_path() -> Path | None:
+        current = str(config.ZIM_DIR or initial_zim_dir).strip()
+        return Path(current) if current else None
+
+    def _library_xml_path() -> Path | None:
+        current = str(config.LIBRARY_XML_PATH or initial_library_xml_path).strip()
+        return Path(current) if current else None
 
     def _render(title: str, body: str, *, extra_head: str = "") -> HTMLResponse:
-        banner = _setup_banner(_setup_issues(zim_dir_path))
+        banner = _setup_banner(_setup_issues(_zim_dir_path()))
         return _page(title, banner + body, extra_head=extra_head)
 
     def _refresh_library() -> None:
-        if zim_dir_path and library_xml_path:
-            zim_library.refresh_library(zim_dir_path, Path(library_xml_path))
+        zim_path = _zim_dir_path()
+        library_path = _library_xml_path()
+        if zim_path and library_path:
+            zim_library.refresh_library(zim_path, library_path)
 
     async def dashboard(request: Request) -> HTMLResponse:
         kiwix_status, qdrant_status, embed_status, rerank_status = [
             await _reachable(url)
             for url in (config.KIWIX_URL, config.QDRANT_URL, config.EMBED_URL, config.RERANK_URL)
         ]
-        books = zim_library.scan_zim_dir(zim_dir_path) if zim_dir_path else []
+        zim_path = _zim_dir_path()
+        books = zim_library.scan_zim_dir(zim_path) if zim_path else []
         corpus_bytes = sum(b.size_bytes for b in books)
         disk_line = ""
-        if zim_dir_path and zim_dir_path.is_dir():
-            usage = shutil.disk_usage(zim_dir_path)
+        if zim_path and zim_path.is_dir():
+            usage = shutil.disk_usage(zim_path)
             disk_line = (
                 f"<p>Data drive: {_human_bytes(usage.used)} used / "
                 f"{_human_bytes(usage.total)} total "
@@ -201,7 +218,8 @@ def build_admin_app(
         return _render("Dashboard", body)
 
     async def sources(request: Request) -> HTMLResponse:
-        books = zim_library.scan_zim_dir(zim_dir_path) if zim_dir_path else []
+        zim_path = _zim_dir_path()
+        books = zim_library.scan_zim_dir(zim_path) if zim_path else []
         rows = []
         for b in sorted(books, key=lambda b: b.title.lower()):
             enabled = settings.is_book_enabled(b.name)
@@ -255,9 +273,10 @@ def build_admin_app(
     async def sources_delete(request: Request) -> RedirectResponse:
         form = await request.form()
         filename = str(form.get("filename", ""))
-        if filename and zim_dir_path:
+        zim_path = _zim_dir_path()
+        if filename and zim_path:
             try:
-                delete_zim(zim_dir_path, filename, on_complete=_refresh_library)
+                delete_zim(zim_path, filename, on_complete=_refresh_library)
             except ValueError:
                 pass
         return RedirectResponse("/sources", status_code=303)
@@ -280,7 +299,7 @@ def build_admin_app(
                     f'<span class="muted">{html.escape(e.name)} &middot; '
                     f"{html.escape(e.language)} &middot; "
                     f"{e.article_count:,} articles &middot; {_human_bytes(e.size_bytes)}</span>"
-                    f"{fts_note}</td><td>{_download_action(e, zim_dir_path)}</td></tr>"
+                    f"{fts_note}</td><td>{_download_action(e, _zim_dir_path())}</td></tr>"
                 )
             results_html = (
                 "<table><tr><th>Book</th><th>Action</th></tr>" + "".join(rows) + "</table>"
@@ -305,7 +324,7 @@ def build_admin_app(
     async def recommendations_page(request: Request) -> HTMLResponse:
         installed = {
             b.name
-            for b in (zim_library.scan_zim_dir(zim_dir_path) if zim_dir_path else [])
+            for b in (zim_library.scan_zim_dir(_zim_dir_path()) if _zim_dir_path() else [])
             if b.metadata_error is None
         }
         resolved = await recommendations.resolve_recommendations()
@@ -326,7 +345,7 @@ def build_admin_app(
             action = (
                 '<span class="badge ok">installed</span>'
                 if entry.name in installed
-                else _download_action(entry, zim_dir_path)
+                else _download_action(entry, _zim_dir_path())
             )
             rows.append(
                 f"<tr><td>{html.escape(rec.label)}<br>"
@@ -353,8 +372,10 @@ def build_admin_app(
         form = await request.form()
         url = str(form.get("url", ""))
         filename = str(form.get("filename", ""))
-        if url and filename and zim_dir_path is not None:
+        zim_path = _zim_dir_path()
+        if url and filename and zim_path is not None:
             try:
+                download_manager.zim_dir = zim_path
                 download_manager.start(url, filename)
             except ValueError:
                 pass
@@ -422,6 +443,54 @@ def build_admin_app(
         settings.set_rerank_enabled(form.get("rerank") == "1")
         return RedirectResponse("/settings", status_code=303)
 
+    async def configuration_page(request: Request) -> HTMLResponse:
+        saved = settings.config_values()
+
+        def row(field: dict[str, object]) -> str:
+            name = str(field["name"])
+            current = saved.get(name, str(getattr(config, name, "")))
+            input_type = "number" if field.get("type") == "int" else "text"
+            if field.get("secret"):
+                input_type = "password"
+            help_text = str(field.get("help", ""))
+            if field.get("restart"):
+                help_text = (help_text + " " if help_text else "") + "Requires restart."
+            help_html = (
+                f'<span class="muted field-help">{html.escape(help_text)}</span>'
+                if help_text
+                else ""
+            )
+            return (
+                f"<tr><th>{html.escape(str(field.get('label', name)))}"
+                f"<br><span class='muted'>{html.escape(name)}</span></th>"
+                f"<td><input class='config-input' type='{input_type}' name='{html.escape(name)}' "
+                f"value='{html.escape(str(current), quote=True)}'>{help_html}</td></tr>"
+            )
+
+        rows = "".join(row(field) for field in config.CONFIG_FIELDS)
+        body = f"""
+        <h2>Gateway configuration</h2>
+        <p class="muted">Values saved here override environment/config file values for the gateway.
+        Most tool endpoints and API keys apply immediately; bind addresses, ports, settings database
+        moves, and Docker volume paths still need a restart or compose recreation.</p>
+        <form method="post" action="/configuration/update">
+          <table><tr><th>Setting</th><th>Value</th></tr>{rows}</table>
+          <button type="submit">Save configuration</button>
+        </form>
+        """
+        return _render("Configuration", body)
+
+    async def configuration_update(request: Request) -> RedirectResponse:
+        form = await request.form()
+        values: dict[str, str] = {}
+        for name in config.CONFIG_FIELD_NAMES:
+            value = str(form.get(name, ""))
+            settings.set_config_value(name, value)
+            values[name] = value
+        config.apply_runtime_overrides(values)
+        _refresh_library()
+        return RedirectResponse("/configuration", status_code=303)
+
     return Starlette(
         routes=[
             Route("/", dashboard),
@@ -434,5 +503,7 @@ def build_admin_app(
             Route("/downloads", downloads_page),
             Route("/settings", settings_page),
             Route("/settings/update", settings_update, methods=["POST"]),
+            Route("/configuration", configuration_page),
+            Route("/configuration/update", configuration_update, methods=["POST"]),
         ]
     )

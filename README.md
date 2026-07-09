@@ -85,6 +85,8 @@ Open <http://localhost:8090> and use:
   library.
 - **Sources** to see installed books, disable books from search, or delete them.
 - **Downloads** to track active downloads.
+- **Configuration** to set API keys, service URLs, default limits, model
+  endpoints, and storage-related paths.
 
 Kiwix hot-reloads the generated `library.xml`, so completed downloads become
 available without restarting the stack.
@@ -192,8 +194,14 @@ authentication, so expose it beyond localhost only on a trusted network.
 
 ## Configuration
 
-Settings are read from environment variables and, if present, `config/.env`.
-Real environment variables win over the file.
+Settings can be changed from the admin UI's **Configuration** page. Saved
+values are stored in `SETTINGS_DB` and override environment/config-file values
+when the hosted gateway starts; most API keys, URLs, limits, and model endpoints
+also apply immediately when you save.
+
+The gateway still reads environment variables and, if present, `config/.env` as
+its initial defaults. Real environment variables win over the file before admin
+overrides are applied.
 
 Common settings:
 
@@ -210,7 +218,14 @@ Common settings:
 | `ADMIN_HOST`, `ADMIN_PORT` | Admin UI and HTTP MCP bind address |
 
 Runtime choices made in the admin UI, such as retrieval mode, reranking, and
-per-book enablement, are stored in `SETTINGS_DB` and take effect immediately.
+per-book enablement, are also stored in `SETTINGS_DB` and take effect
+immediately.
+
+Some values describe the running process or Docker bind mounts. Changes to
+`ADMIN_HOST`, `ADMIN_PORT`, `SETTINGS_DB`, and compose-managed storage paths
+such as host-side `ZIM_DIR` or `QDRANT_STORAGE` are saved in the UI, but they
+need a gateway restart or Docker Compose recreation before the underlying bind
+or listener changes.
 
 ## Smoke Test
 
