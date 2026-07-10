@@ -322,9 +322,10 @@ def build_admin_app(
         return _render("Catalog", body)
 
     async def recommendations_page(request: Request) -> HTMLResponse:
+        zim_path = _zim_dir_path()
         installed = {
             b.name
-            for b in (zim_library.scan_zim_dir(_zim_dir_path()) if _zim_dir_path() else [])
+            for b in (zim_library.scan_zim_dir(zim_path) if zim_path else [])
             if b.metadata_error is None
         }
         resolved = await recommendations.resolve_recommendations()
@@ -448,10 +449,13 @@ def build_admin_app(
 
         def row(field: dict[str, object]) -> str:
             name = str(field["name"])
-            current = saved.get(name, str(getattr(config, name, "")))
+            is_secret = bool(field.get("secret"))
+            current = "" if is_secret else saved.get(name, str(getattr(config, name, "")))
             input_type = "number" if field.get("type") == "int" else "text"
-            if field.get("secret"):
+            if is_secret:
                 input_type = "password"
+            autocomplete = " autocomplete='new-password'" if is_secret else ""
+            placeholder = " placeholder='Leave blank to keep current value'" if is_secret else ""
             help_text = str(field.get("help", ""))
             if field.get("restart"):
                 help_text = (help_text + " " if help_text else "") + "Requires restart."
@@ -464,7 +468,8 @@ def build_admin_app(
                 f"<tr><th>{html.escape(str(field.get('label', name)))}"
                 f"<br><span class='muted'>{html.escape(name)}</span></th>"
                 f"<td><input class='config-input' type='{input_type}' name='{html.escape(name)}' "
-                f"value='{html.escape(str(current), quote=True)}'>{help_html}</td></tr>"
+                f"value='{html.escape(str(current), quote=True)}'{autocomplete}{placeholder}>"
+                f"{help_html}</td></tr>"
             )
 
         rows = "".join(row(field) for field in config.CONFIG_FIELDS)
@@ -482,9 +487,22 @@ def build_admin_app(
 
     async def configuration_update(request: Request) -> RedirectResponse:
         form = await request.form()
+        saved = settings.config_values()
         values: dict[str, str] = {}
-        for name in config.CONFIG_FIELD_NAMES:
+        for field in config.CONFIG_FIELDS:
+            name = str(field["name"])
             value = str(form.get(name, ""))
+            if field.get("secret") and not value:
+                if name in saved:
+                    values[name] = saved[name]
+                continue
+            if field.get("type") == "int":
+                try:
+                    value = str(int(value.strip()))
+                except ValueError:
+                    if name in saved:
+                        values[name] = saved[name]
+                    continue
             settings.set_config_value(name, value)
             values[name] = value
         config.apply_runtime_overrides(values)

@@ -240,10 +240,10 @@ def apply_runtime_overrides(values: dict[str, str]) -> list[str]:
     for name, raw in values.items():
         if name not in CONFIG_FIELD_NAMES:
             continue
-        value: object = raw
+        value: object = str(raw).strip()
         if name in INT_CONFIG_FIELDS:
             try:
-                value = int(str(raw).strip())
+                value = int(value)
             except ValueError:
                 continue
         globals()[name] = value
