@@ -39,7 +39,10 @@ services:
       - "8080:8080"
     # Library mode: serves whatever library.xml lists (the gateway writes this
     # as ZIMs are added/removed) and hot-reloads on change — no restart needed.
-    command: ["--port", "8080", "--library", "--monitorLibrary", "/data/library.xml"]
+    # The image's start.sh already injects `--port=8080` (override via the PORT
+    # env var, not a flag) and appends this command, so passing --port here
+    # would duplicate it and kiwix-serve's strict parser rejects the whole line.
+    command: ["--library", "--monitorLibrary", "/data/library.xml"]
     volumes:
       - "${ZIM_DIR:-./data/zim}:/data:ro"
     working_dir: /data
