@@ -41,11 +41,15 @@ async def kiwix_search(query: str, limit: int, books: list[str] | None = None) -
     """Query kiwix-serve full-text search. Raises httpx.HTTPError if unreachable.
 
     `books`, when given, restricts the search to those book names (repeated
-    `books.name=` params — libkiwix's InternalServer collects every value via
-    `get_arguments`, so this searches the union of the listed books). This is
-    how the admin UI's per-book enable/disable toggle takes effect. When
+    `books.filter.name=` params — libkiwix's InternalServer collects every
+    value via `get_arguments`, so this searches the union of the listed books).
+    This is how the admin UI's per-book enable/disable toggle takes effect. When
     omitted, falls back to the single-book KIWIX_BOOK filter from config (or no
     filter at all).
+
+    NOTE: the parameter is `books.filter.name`, not `books.name`. kiwix-serve
+    rejects an unknown `books.*` filter key with HTTP 400 (not an empty result),
+    so getting this wrong makes every filtered search raise rather than degrade.
     """
     if books == []:
         return []
@@ -56,9 +60,9 @@ async def kiwix_search(query: str, limit: int, books: list[str] | None = None) -
         "format": "xml",
     }
     if books is not None:
-        params["books.name"] = books
+        params["books.filter.name"] = books
     elif config.KIWIX_BOOK:
-        params["books.name"] = config.KIWIX_BOOK
+        params["books.filter.name"] = config.KIWIX_BOOK
 
     async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True) as client:
         resp = await client.get(
