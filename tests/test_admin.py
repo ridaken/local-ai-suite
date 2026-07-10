@@ -417,6 +417,39 @@ def test_sources_download_is_a_noop_without_zim_dir(tmp_path):
     assert mgr.list_jobs() == []
 
 
+def test_nav_has_three_primary_tabs_with_active_indicator(tmp_path, monkeypatch):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+    monkeypatch.setattr(admin, "_reachable", _fake_reachable)
+    monkeypatch.setattr(admin.zim_library, "scan_zim_dir", lambda _dir: [])
+
+    # Dashboard: the Dashboard primary tab is active.
+    resp = client.get("/")
+    assert resp.text.count('nav class="primary"') == 1
+    for label in ("Dashboard", "Knowledge Base", "Settings"):
+        assert label in resp.text
+    assert '<a class="active" href="/">Dashboard</a>' in resp.text
+
+
+def test_knowledge_base_pages_share_active_primary_and_show_subnav(tmp_path, monkeypatch):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+    monkeypatch.setattr(admin.zim_library, "scan_zim_dir", lambda _dir: [])
+
+    # On /catalog, the Knowledge Base primary tab is active and the sub-nav shows
+    # Catalog as the active sub-tab.
+    resp = client.get("/catalog")
+    assert '<a class="active" href="/sources">Knowledge Base</a>' in resp.text
+    assert 'nav class="subnav"' in resp.text
+    assert '<a class="active" href="/catalog">Catalog</a>' in resp.text
+
+
+def test_settings_group_active_on_configuration_page(tmp_path):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+
+    resp = client.get("/configuration")
+    assert '<a class="active" href="/settings">Settings</a>' in resp.text
+    assert '<a class="active" href="/configuration">Configuration</a>' in resp.text
+
+
 def test_settings_update_changes_mode_and_rerank(tmp_path):
     client, settings, _mgr, _zim_dir = _client(tmp_path)
 

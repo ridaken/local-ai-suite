@@ -7,6 +7,7 @@ from mcp_gateway.catalog import CatalogEntry
 from mcp_gateway.recommendations import (
     Recommendation,
     best_entry,
+    pick_entry,
     resolve_recommendation,
     resolve_recommendations,
 )
@@ -87,6 +88,49 @@ def test_best_entry_returns_none_when_no_valid_download_exists():
     no_download = _entry("devdocs_python", download_url=None)
 
     assert best_entry([no_download], rec) is None
+
+
+def test_best_entry_keeps_downloadable_entry_without_fulltext_index():
+    # Regression: Stack Overflow / DevDocs ZIMs ship with _ftindex:no. They must
+    # still resolve (with a warning badge in the UI), not vanish as "unavailable".
+    rec = Recommendation(key="so", label="Stack Overflow", rationale="", query="stack")
+    so = _entry(
+        "stackoverflow.com_en_all",
+        tags="stack_exchange;_ftindex:no",
+        has_fulltext_index=False,
+    )
+
+    assert best_entry([so], rec) == so
+
+
+def test_pick_entry_prefers_canonical_match_over_higher_score():
+    # A generic higher-scoring entry should lose to the pinned canonical name.
+    rec = Recommendation(
+        key="python",
+        label="Python",
+        rationale="",
+        query="python",
+        match_names=("docs.python.org_en_all",),
+    )
+    canonical = _entry(
+        "docs.python.org_en_all", tags="_ftindex:yes", has_fulltext_index=True
+    )
+    distractor = _entry(
+        "python_tutorials_en_all", tags="_ftindex:yes", has_fulltext_index=True
+    )
+
+    assert pick_entry([distractor, canonical], rec) == canonical
+
+
+def test_pick_entry_dedupes_and_falls_back_to_scoring_without_match():
+    rec = Recommendation(
+        key="wiki", label="Wikipedia", rationale="", query="wikipedia",
+        match_names=("wikipedia_en_all",), prefer_terms=("wikipedia",),
+    )
+    # Canonical name absent; duplicates present. Falls back to best score, deduped.
+    a = _entry("wikipedia_en_100", has_fulltext_index=True)
+    result = pick_entry([a, a, a], rec)
+    assert result == a
 
 
 def test_resolve_recommendation_returns_unavailable_on_catalog_error():
