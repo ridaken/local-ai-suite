@@ -29,6 +29,7 @@ from .downloads import DownloadManager
 from .settings_store import default_store
 from .tools.arxiv import arxiv_search as _arxiv_search
 from .tools.compute import calculate as _calculate
+from .tools.kb_read import kb_read as _kb_read
 from .tools.kb_search import kb_search as _kb_search
 from .tools.pubmed import pubmed_search as _pubmed_search
 from .tools.web_search import web_search as _web_search
@@ -44,6 +45,16 @@ async def kb_search(query: str, limit: int = 5) -> str:
     good second opinion to cross-check web results. Returns passages with source
     URLs to cite."""
     return await _kb_search(query, limit)
+
+
+@mcp.tool()
+async def kb_read(source: str, offset: int = 0) -> str:
+    """Read the full text of a knowledge-base article found via kb_search.
+    Pass a result's source URL to get the article body in pages of a few
+    thousand characters; each response says what offset to pass to continue
+    reading. Use this whenever a kb_search snippet looks relevant but you need
+    the detail behind it — snippets are short previews, not the article."""
+    return await _kb_read(source, offset)
 
 
 @mcp.tool()

@@ -46,6 +46,9 @@ ARXIV_API_URL = os.environ.get("ARXIV_API_URL", "https://export.arxiv.org/api/qu
 # Defaults
 KB_SEARCH_LIMIT = _int("KB_SEARCH_LIMIT", 5)
 WEB_SEARCH_LIMIT = _int("WEB_SEARCH_LIMIT", 5)
+# kb_read returns article text in windows of this many characters; the model
+# pages through with the offset parameter.
+KB_READ_WINDOW_CHARS = _int("KB_READ_WINDOW_CHARS", 4000)
 
 # Shared HTTP settings
 HTTP_TIMEOUT = 20.0

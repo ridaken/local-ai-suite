@@ -27,6 +27,7 @@ at the gateway.
 | Tool | Use it for | Works offline? |
 | --- | --- | --- |
 | `kb_search` | Local reference answers from installed ZIMs and, if enabled, your indexed files | Yes |
+| `kb_read` | Full article text behind a `kb_search` result, a few thousand characters per page | Yes |
 | `calculate` | Exact arithmetic and common math functions | Yes |
 | `web_search` | Current web results through Kagi | No, needs `KAGI_API_KEY` |
 | `pubmed_search` | Biomedical literature citations from PubMed | No |
