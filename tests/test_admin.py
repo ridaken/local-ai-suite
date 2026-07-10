@@ -426,3 +426,63 @@ def test_settings_update_changes_mode_and_rerank(tmp_path):
     assert resp.status_code == 303
     assert settings.get_retrieval_mode() == "vector"
     assert settings.get_rerank_enabled() is False
+
+
+def test_configuration_page_shows_editable_config(tmp_path):
+    client, settings, _mgr, _zim_dir = _client(tmp_path)
+    settings.set_config_value("KAGI_API_KEY", "must-not-appear")
+
+    resp = client.get("/configuration")
+
+    assert resp.status_code == 200
+    assert "Gateway configuration" in resp.text
+    assert "KAGI_API_KEY" in resp.text
+    assert "ZIM_DIR" in resp.text
+    assert "must-not-appear" not in resp.text
+    assert "Leave blank to keep current value" in resp.text
+
+
+def test_configuration_update_persists_and_applies_values(tmp_path, monkeypatch):
+    client, settings, _mgr, _zim_dir = _client(tmp_path)
+    monkeypatch.setattr(admin.config, "KAGI_API_KEY", "")
+    monkeypatch.setattr(admin.config, "KB_SEARCH_LIMIT", 5)
+    data = {
+        name: str(getattr(admin.config, name, ""))
+        for name in admin.config.CONFIG_FIELD_NAMES
+    }
+    data["KAGI_API_KEY"] = "kagi-test-key"
+    data["KB_SEARCH_LIMIT"] = "12"
+
+    resp = client.post("/configuration/update", data=data, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/configuration"
+    assert settings.get_config_value("KAGI_API_KEY") == "kagi-test-key"
+    assert admin.config.KAGI_API_KEY == "kagi-test-key"
+    assert admin.config.KB_SEARCH_LIMIT == 12
+
+
+def test_configuration_update_keeps_blank_secret_and_rejects_invalid_int(tmp_path, monkeypatch):
+    client, settings, _mgr, _zim_dir = _client(tmp_path)
+    settings.set_config_value("KAGI_API_KEY", "existing-secret")
+    settings.set_config_value("KB_SEARCH_LIMIT", "9")
+    monkeypatch.setattr(admin.config, "KAGI_API_KEY", "existing-secret")
+    monkeypatch.setattr(admin.config, "KB_SEARCH_LIMIT", 9)
+    data = {
+        name: str(getattr(admin.config, name, ""))
+        for name in admin.config.CONFIG_FIELD_NAMES
+    }
+    data["KAGI_API_KEY"] = ""
+    data["KB_SEARCH_LIMIT"] = "not-an-int"
+
+    resp = client.post(
+        "/configuration/update",
+        data=data,
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert settings.get_config_value("KAGI_API_KEY") == "existing-secret"
+    assert settings.get_config_value("KB_SEARCH_LIMIT") == "9"
+    assert admin.config.KAGI_API_KEY == "existing-secret"
+    assert admin.config.KB_SEARCH_LIMIT == 9

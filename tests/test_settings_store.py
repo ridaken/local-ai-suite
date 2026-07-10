@@ -69,3 +69,15 @@ def test_settings_persist_across_instances(tmp_path):
     db_path = tmp_path / "settings.db"
     SettingsStore(db_path).set_retrieval_mode("lexical")
     assert SettingsStore(db_path).get_retrieval_mode() == "lexical"
+
+
+def test_config_values_round_trip(tmp_path):
+    store = _store(tmp_path)
+    store.set_config_value("KAGI_API_KEY", "secret")
+    store.set_config_value("ZIM_DIR", "D:/ai-data/zim")
+
+    assert store.get_config_value("KAGI_API_KEY") == "secret"
+    assert store.config_values() == {
+        "KAGI_API_KEY": "secret",
+        "ZIM_DIR": "D:/ai-data/zim",
+    }

@@ -89,6 +89,20 @@ class SettingsStore:
         """Filter an installed-book-name list down to the enabled ones."""
         return [name for name in installed if self.is_book_enabled(name)]
 
+    # --- configuration overrides -------------------------------------------
+    def get_config_value(self, key: str) -> str | None:
+        return self._get(f"config.{key}")
+
+    def set_config_value(self, key: str, value: str) -> None:
+        self._set(f"config.{key}", value)
+
+    def config_values(self) -> dict[str, str]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM settings WHERE key LIKE 'config.%'"
+            ).fetchall()
+        return {key.removeprefix("config."): value for key, value in rows}
+
     # --- internal --------------------------------------------------------------
     def _get(self, key: str) -> str | None:
         with self._lock, self._connect() as conn:
