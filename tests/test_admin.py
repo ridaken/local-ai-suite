@@ -417,6 +417,39 @@ def test_sources_download_is_a_noop_without_zim_dir(tmp_path):
     assert mgr.list_jobs() == []
 
 
+def test_nav_has_three_primary_tabs_with_active_indicator(tmp_path, monkeypatch):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+    monkeypatch.setattr(admin, "_reachable", _fake_reachable)
+    monkeypatch.setattr(admin.zim_library, "scan_zim_dir", lambda _dir: [])
+
+    # Dashboard: the Dashboard primary tab is active.
+    resp = client.get("/")
+    assert resp.text.count('nav class="primary"') == 1
+    for label in ("Dashboard", "Knowledge Base", "Settings"):
+        assert label in resp.text
+    assert '<a class="active" href="/">Dashboard</a>' in resp.text
+
+
+def test_knowledge_base_pages_share_active_primary_and_show_subnav(tmp_path, monkeypatch):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+    monkeypatch.setattr(admin.zim_library, "scan_zim_dir", lambda _dir: [])
+
+    # On /catalog, the Knowledge Base primary tab is active and the sub-nav shows
+    # Catalog as the active sub-tab.
+    resp = client.get("/catalog")
+    assert '<a class="active" href="/sources">Knowledge Base</a>' in resp.text
+    assert 'nav class="subnav"' in resp.text
+    assert '<a class="active" href="/catalog">Catalog</a>' in resp.text
+
+
+def test_settings_group_active_on_configuration_page(tmp_path):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+
+    resp = client.get("/configuration")
+    assert '<a class="active" href="/settings">Settings</a>' in resp.text
+    assert '<a class="active" href="/configuration">Configuration</a>' in resp.text
+
+
 def test_settings_update_changes_mode_and_rerank(tmp_path):
     client, settings, _mgr, _zim_dir = _client(tmp_path)
 
@@ -428,35 +461,65 @@ def test_settings_update_changes_mode_and_rerank(tmp_path):
     assert settings.get_rerank_enabled() is False
 
 
-def test_configuration_page_shows_editable_config(tmp_path):
-    client, settings, _mgr, _zim_dir = _client(tmp_path)
-    settings.set_config_value("KAGI_API_KEY", "must-not-appear")
+def test_configuration_page_shows_section_tabs_and_default_section(tmp_path):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
 
     resp = client.get("/configuration")
 
     assert resp.status_code == 200
     assert "Gateway configuration" in resp.text
-    assert "KAGI_API_KEY" in resp.text
+    assert 'nav class="section-tabs"' in resp.text
+    # All six section tabs are present (labels are HTML-escaped in the markup);
+    # the first (Storage & paths) is active.
+    import html as _html
+    for _key, label in admin.config.CONFIG_GROUPS:
+        assert _html.escape(label) in resp.text
+    assert '<a class="active" href="/configuration?section=storage">Storage &amp; paths</a>' \
+        in resp.text
+    # Default section shows storage fields, not fields from other sections.
     assert "ZIM_DIR" in resp.text
+    assert "KAGI_API_KEY" not in resp.text  # tools section
+
+
+def test_configuration_section_shows_only_its_fields_and_hides_secrets(tmp_path):
+    client, settings, _mgr, _zim_dir = _client(tmp_path)
+    settings.set_config_value("KAGI_API_KEY", "must-not-appear")
+
+    resp = client.get("/configuration", params={"section": "tools"})
+
+    assert resp.status_code == 200
+    assert '<a class="active" href="/configuration?section=tools">Web &amp; API tools</a>' \
+        in resp.text
+    assert "KAGI_API_KEY" in resp.text
     assert "must-not-appear" not in resp.text
     assert "Leave blank to keep current value" in resp.text
+    assert "ZIM_DIR" not in resp.text  # storage section
 
 
-def test_configuration_update_persists_and_applies_values(tmp_path, monkeypatch):
+def test_configuration_unknown_section_falls_back_to_first(tmp_path):
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
+
+    resp = client.get("/configuration", params={"section": "bogus"})
+
+    assert resp.status_code == 200
+    assert '<a class="active" href="/configuration?section=storage">' in resp.text
+
+
+def test_configuration_update_persists_and_applies_section_values(tmp_path, monkeypatch):
     client, settings, _mgr, _zim_dir = _client(tmp_path)
     monkeypatch.setattr(admin.config, "KAGI_API_KEY", "")
     monkeypatch.setattr(admin.config, "KB_SEARCH_LIMIT", 5)
+    # KAGI_API_KEY and KB_SEARCH_LIMIT both live in the "tools" section.
     data = {
-        name: str(getattr(admin.config, name, ""))
-        for name in admin.config.CONFIG_FIELD_NAMES
+        "section": "tools",
+        "KAGI_API_KEY": "kagi-test-key",
+        "KB_SEARCH_LIMIT": "12",
     }
-    data["KAGI_API_KEY"] = "kagi-test-key"
-    data["KB_SEARCH_LIMIT"] = "12"
 
     resp = client.post("/configuration/update", data=data, follow_redirects=False)
 
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/configuration"
+    assert resp.headers["location"] == "/configuration?section=tools"
     assert settings.get_config_value("KAGI_API_KEY") == "kagi-test-key"
     assert admin.config.KAGI_API_KEY == "kagi-test-key"
     assert admin.config.KB_SEARCH_LIMIT == 12
@@ -469,20 +532,34 @@ def test_configuration_update_keeps_blank_secret_and_rejects_invalid_int(tmp_pat
     monkeypatch.setattr(admin.config, "KAGI_API_KEY", "existing-secret")
     monkeypatch.setattr(admin.config, "KB_SEARCH_LIMIT", 9)
     data = {
-        name: str(getattr(admin.config, name, ""))
-        for name in admin.config.CONFIG_FIELD_NAMES
+        "section": "tools",
+        "KAGI_API_KEY": "",  # blank secret -> keep existing
+        "KB_SEARCH_LIMIT": "not-an-int",  # invalid int -> keep existing
     }
-    data["KAGI_API_KEY"] = ""
-    data["KB_SEARCH_LIMIT"] = "not-an-int"
 
-    resp = client.post(
-        "/configuration/update",
-        data=data,
-        follow_redirects=False,
-    )
+    resp = client.post("/configuration/update", data=data, follow_redirects=False)
 
     assert resp.status_code == 303
     assert settings.get_config_value("KAGI_API_KEY") == "existing-secret"
     assert settings.get_config_value("KB_SEARCH_LIMIT") == "9"
     assert admin.config.KAGI_API_KEY == "existing-secret"
     assert admin.config.KB_SEARCH_LIMIT == 9
+
+
+def test_configuration_update_one_section_does_not_wipe_another(tmp_path, monkeypatch):
+    # Regression for the section-scoped save: persisting the "tools" section must
+    # not blank a value previously saved in the "kiwix" section, even though that
+    # field isn't part of the submitted form.
+    client, settings, _mgr, _zim_dir = _client(tmp_path)
+    settings.set_config_value("KIWIX_BOOK", "wikipedia_en_all")
+    monkeypatch.setattr(admin.config, "KIWIX_BOOK", "wikipedia_en_all")
+
+    resp = client.post(
+        "/configuration/update",
+        data={"section": "tools", "KB_SEARCH_LIMIT": "7"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert settings.get_config_value("KIWIX_BOOK") == "wikipedia_en_all"
+    assert admin.config.KIWIX_BOOK == "wikipedia_en_all"

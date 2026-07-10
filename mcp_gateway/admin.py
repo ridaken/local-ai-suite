@@ -28,23 +28,73 @@ from .catalog import CatalogEntry
 from .downloads import DownloadManager, delete_zim
 from .settings_store import SettingsStore
 
-_NAV = [
-    ("/", "Dashboard"),
-    ("/sources", "Sources"),
-    ("/recommendations", "Recommended"),
-    ("/catalog", "Catalog"),
-    ("/downloads", "Downloads"),
-    ("/settings", "Settings"),
-    ("/configuration", "Configuration"),
+# Two-tier navigation. The primary tabs collapse the seven pages into three
+# groups; each entry lists the routes that belong to it (so the right primary
+# tab highlights no matter which sub-page you're on). Groups with a sub-nav list
+# their pages in _SUB_NAV.
+_PRIMARY_NAV = [
+    ("/", "Dashboard", ("/",)),
+    ("/sources", "Knowledge Base", ("/sources", "/recommendations", "/catalog", "/downloads")),
+    ("/settings", "Settings", ("/settings", "/configuration")),
 ]
+
+_SUB_NAV = {
+    "/sources": [
+        ("/sources", "Installed"),
+        ("/recommendations", "Recommended"),
+        ("/catalog", "Catalog"),
+        ("/downloads", "Downloads"),
+    ],
+    "/settings": [
+        ("/settings", "Retrieval"),
+        ("/configuration", "Configuration"),
+    ],
+}
+
+
+def _nav_html(current_path: str) -> str:
+    active_group = next(
+        (group for group, _label, members in _PRIMARY_NAV if current_path in members),
+        "/",
+    )
+    primary = "".join(
+        f'<a class="{"active" if group == active_group else ""}" href="{group}">'
+        f"{html.escape(label)}</a>"
+        for group, label, _members in _PRIMARY_NAV
+    )
+    sub = ""
+    if active_group in _SUB_NAV:
+        sub_links = "".join(
+            f'<a class="{"active" if path == current_path else ""}" href="{path}">'
+            f"{html.escape(label)}</a>"
+            for path, label in _SUB_NAV[active_group]
+        )
+        sub = f'<nav class="subnav">{sub_links}</nav>'
+    return f'<nav class="primary">{primary}</nav>{sub}'
 
 _CSS = """
 body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:#0e0e10;color:#eaeaea}
 @media (prefers-color-scheme: light){body{background:#fafafa;color:#111}}
 header{padding:1rem 1.5rem;border-bottom:1px solid #3a3a3a}
-header h1{margin:0 0 .5rem;font-size:1.1rem}
-nav a{margin-right:1.25rem;color:#7db9e8;text-decoration:none;font-size:.95rem}
-nav a:hover{text-decoration:underline}
+header h1{margin:0 0 .6rem;font-size:1.1rem}
+nav.primary a{display:inline-block;margin-right:1.4rem;padding:.15rem 0;color:#7db9e8;
+  text-decoration:none;font-size:1rem;border-bottom:2px solid transparent}
+nav.primary a:hover{color:#a9d4f5}
+nav.primary a.active{color:#eaeaea;font-weight:600;border-bottom-color:#7db9e8}
+@media (prefers-color-scheme: light){nav.primary a.active{color:#111}}
+:root[data-theme="light"] nav.primary a.active{color:#111}
+:root[data-theme="dark"] nav.primary a.active{color:#eaeaea}
+nav.subnav{margin-top:.55rem}
+nav.subnav a{display:inline-block;margin-right:.5rem;padding:.2rem .7rem;border-radius:1rem;
+  color:#7db9e8;text-decoration:none;font-size:.85rem}
+nav.subnav a:hover{background:rgba(125,185,232,.15)}
+nav.subnav a.active{background:#7db9e8;color:#0e0e10;font-weight:600}
+nav.section-tabs{display:flex;flex-wrap:wrap;gap:.15rem;margin:.75rem 0 1rem;
+  border-bottom:1px solid #333}
+nav.section-tabs a{padding:.35rem .8rem;color:#7db9e8;text-decoration:none;font-size:.88rem;
+  border-bottom:2px solid transparent;margin-bottom:-1px}
+nav.section-tabs a:hover{color:#a9d4f5}
+nav.section-tabs a.active{color:inherit;font-weight:600;border-bottom-color:#7db9e8}
 main{padding:1.5rem;max-width:960px;margin:0 auto}
 h2{font-size:1.1rem;margin-top:2rem}
 table{width:100%;border-collapse:collapse;margin:.75rem 0}
@@ -69,13 +119,12 @@ input[type=password],input[type=number]{padding:.3rem .5rem;width:280px}
 """
 
 
-def _page(title: str, body: str, *, extra_head: str = "") -> HTMLResponse:
-    nav_html = "".join(f'<a href="{href}">{label}</a>' for href, label in _NAV)
+def _page(title: str, body: str, *, current_path: str = "/", extra_head: str = "") -> HTMLResponse:
     return HTMLResponse(
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<title>{html.escape(title)} — local-ai-suite</title>"
         f"<style>{_CSS}</style>{extra_head}</head><body>"
-        f"<header><h1>local-ai-suite admin</h1><nav>{nav_html}</nav></header>"
+        f"<header><h1>local-ai-suite admin</h1>{_nav_html(current_path)}</header>"
         f"<main>{body}</main></body></html>"
     )
 
@@ -174,9 +223,13 @@ def build_admin_app(
         current = str(config.LIBRARY_XML_PATH or initial_library_xml_path).strip()
         return Path(current) if current else None
 
-    def _render(title: str, body: str, *, extra_head: str = "") -> HTMLResponse:
+    def _render(
+        request: Request, title: str, body: str, *, extra_head: str = ""
+    ) -> HTMLResponse:
         banner = _setup_banner(_setup_issues(_zim_dir_path()))
-        return _page(title, banner + body, extra_head=extra_head)
+        return _page(
+            title, banner + body, current_path=request.url.path, extra_head=extra_head
+        )
 
     def _refresh_library() -> None:
         zim_path = _zim_dir_path()
@@ -215,7 +268,7 @@ def build_admin_app(
            &middot; reranking: <b>{"on" if settings.get_rerank_enabled() else "off"}</b>
            &middot; see <a href="/settings">Settings</a> to change.</p>
         """
-        return _render("Dashboard", body)
+        return _render(request, "Dashboard", body)
 
     async def sources(request: Request) -> HTMLResponse:
         zim_path = _zim_dir_path()
@@ -260,7 +313,7 @@ def build_admin_app(
             else empty_note
         )
         body = f"<h2>Installed sources</h2>{table}"
-        return _render("Sources", body)
+        return _render(request, "Installed sources", body)
 
     async def sources_toggle(request: Request) -> RedirectResponse:
         form = await request.form()
@@ -319,7 +372,7 @@ def build_admin_app(
         </form>
         {results_html}
         """
-        return _render("Catalog", body)
+        return _render(request, "Catalog", body)
 
     async def recommendations_page(request: Request) -> HTMLResponse:
         zim_path = _zim_dir_path()
@@ -367,7 +420,7 @@ def build_admin_app(
             + "".join(rows)
             + "</table>"
         )
-        return _render("Recommended", body)
+        return _render(request, "Recommended", body)
 
     async def sources_download(request: Request) -> RedirectResponse:
         form = await request.form()
@@ -405,7 +458,7 @@ def build_admin_app(
             else "<p class='muted'>No downloads yet.</p>"
         )
         body = f"<h2>Downloads</h2>{table}"
-        return _render("Downloads", body, extra_head=refresh)
+        return _render(request, "Downloads", body, extra_head=refresh)
 
     async def settings_page(request: Request) -> HTMLResponse:
         mode = settings.get_retrieval_mode()
@@ -434,7 +487,7 @@ def build_admin_app(
         <p class="muted">Per-book enable/disable lives on the
            <a href="/sources">Sources</a> page.</p>
         """
-        return _render("Settings", body)
+        return _render(request, "Retrieval settings", body)
 
     async def settings_update(request: Request) -> RedirectResponse:
         form = await request.form()
@@ -444,8 +497,15 @@ def build_admin_app(
         settings.set_rerank_enabled(form.get("rerank") == "1")
         return RedirectResponse("/settings", status_code=303)
 
+    def _config_section(request: Request) -> str:
+        section = request.query_params.get("section", "")
+        if section not in config.CONFIG_GROUP_KEYS:
+            return config.CONFIG_GROUP_KEYS[0]
+        return section
+
     async def configuration_page(request: Request) -> HTMLResponse:
         saved = settings.config_values()
+        section = _config_section(request)
 
         def row(field: dict[str, object]) -> str:
             name = str(field["name"])
@@ -472,42 +532,54 @@ def build_admin_app(
                 f"{help_html}</td></tr>"
             )
 
-        rows = "".join(row(field) for field in config.CONFIG_FIELDS)
+        section_tabs = "".join(
+            f'<a class="{"active" if key == section else ""}" '
+            f'href="/configuration?section={key}">{html.escape(label)}</a>'
+            for key, label in config.CONFIG_GROUPS
+        )
+        rows = "".join(
+            row(field) for field in config.CONFIG_FIELDS if field.get("group") == section
+        )
         body = f"""
         <h2>Gateway configuration</h2>
         <p class="muted">Values saved here override environment/config file values for the gateway.
         Most tool endpoints and API keys apply immediately; bind addresses, ports, settings database
         moves, and Docker volume paths still need a restart or compose recreation.</p>
+        <nav class="section-tabs">{section_tabs}</nav>
         <form method="post" action="/configuration/update">
+          <input type="hidden" name="section" value="{html.escape(section)}">
           <table><tr><th>Setting</th><th>Value</th></tr>{rows}</table>
-          <button type="submit">Save configuration</button>
+          <button type="submit">Save this section</button>
         </form>
         """
-        return _render("Configuration", body)
+        return _render(request, "Configuration", body)
 
     async def configuration_update(request: Request) -> RedirectResponse:
         form = await request.form()
+        section = str(form.get("section", ""))
+        if section not in config.CONFIG_GROUP_KEYS:
+            section = config.CONFIG_GROUP_KEYS[0]
         saved = settings.config_values()
-        values: dict[str, str] = {}
+        # Start from every persisted value so saving one section never blanks the
+        # fields on the others (they aren't submitted with this form).
+        values: dict[str, str] = dict(saved)
         for field in config.CONFIG_FIELDS:
+            if field.get("group") != section:
+                continue
             name = str(field["name"])
             value = str(form.get(name, ""))
             if field.get("secret") and not value:
-                if name in saved:
-                    values[name] = saved[name]
-                continue
+                continue  # keep the existing secret (already in values via saved)
             if field.get("type") == "int":
                 try:
                     value = str(int(value.strip()))
                 except ValueError:
-                    if name in saved:
-                        values[name] = saved[name]
-                    continue
+                    continue  # keep the existing value on a bad int
             settings.set_config_value(name, value)
             values[name] = value
         config.apply_runtime_overrides(values)
         _refresh_library()
-        return RedirectResponse("/configuration", status_code=303)
+        return RedirectResponse(f"/configuration?section={section}", status_code=303)
 
     return Starlette(
         routes=[

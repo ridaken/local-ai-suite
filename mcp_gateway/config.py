@@ -131,10 +131,25 @@ KIWIX_CATALOG_URL = os.environ.get(
 ).strip()
 
 
+# Configuration is presented in logical sub-tabs on the admin page rather than
+# one long form. CONFIG_GROUPS is the ordered (key, label) list of those tabs;
+# each field's "group" places it in one. Keep every field's group in sync with a
+# key here, or it won't render on any tab.
+CONFIG_GROUPS = (
+    ("storage", "Storage & paths"),
+    ("kiwix", "Knowledge base"),
+    ("tools", "Web & API tools"),
+    ("vector", "Vector tier"),
+    ("ingest", "Ingest & chunking"),
+    ("server", "Server"),
+)
+
 CONFIG_FIELDS = (
+    # --- Storage & paths ---
     {
         "name": "DATA_ROOT",
         "label": "Data root",
+        "group": "storage",
         "help": (
             "Convenience root for your AI data. Docker bind mounts still use "
             "ZIM_DIR and QDRANT_STORAGE."
@@ -143,83 +158,118 @@ CONFIG_FIELDS = (
     {
         "name": "ZIM_DIR",
         "label": "ZIM directory",
+        "group": "storage",
         "help": (
             "Where downloaded ZIMs and library.xml live. In Docker this is usually "
             "/data inside the gateway container."
         ),
     },
-    {"name": "KIWIX_URL", "label": "Kiwix URL", "help": "Gateway URL for kiwix-serve."},
-    {
-        "name": "KIWIX_BOOK",
-        "label": "Kiwix book filter",
-        "help": "Optional single Kiwix book name to search.",
-    },
-    {
-        "name": "KAGI_API_KEY",
-        "label": "Kagi API key",
-        "secret": True,
-        "help": "Enables the web_search MCP tool.",
-    },
-    {"name": "KAGI_SEARCH_URL", "label": "Kagi search URL"},
-    {"name": "NCBI_API_KEY", "label": "NCBI API key", "secret": True},
-    {"name": "NCBI_EMAIL", "label": "NCBI email"},
-    {"name": "NCBI_TOOL", "label": "NCBI tool name"},
-    {"name": "ARXIV_API_URL", "label": "arXiv API URL"},
-    {"name": "KB_SEARCH_LIMIT", "label": "Default KB search limit", "type": "int"},
-    {"name": "WEB_SEARCH_LIMIT", "label": "Default web search limit", "type": "int"},
-    {"name": "QDRANT_URL", "label": "Qdrant URL"},
-    {"name": "QDRANT_COLLECTION", "label": "Qdrant collection"},
+    {"name": "LIBRARY_XML_PATH", "label": "Kiwix library.xml path", "group": "storage"},
+    {"name": "KIWIX_DATA_DIR", "label": "Kiwix container data path", "group": "storage"},
     {
         "name": "QDRANT_STORAGE",
         "label": "Qdrant storage path",
+        "group": "storage",
         "restart": True,
         "help": (
             "Used by docker-compose volume binding; changing it here is persisted "
             "for visibility but requires compose recreation."
         ),
     },
-    {"name": "EMBED_URL", "label": "Embedding URL"},
-    {"name": "EMBED_MODEL", "label": "Embedding model"},
-    {"name": "EMBED_DIM", "label": "Embedding dimensions", "type": "int"},
-    {"name": "RERANK_URL", "label": "Rerank URL"},
-    {"name": "RERANK_MODEL", "label": "Rerank model"},
+    {"name": "STATE_DB", "label": "Ingest state DB", "group": "storage"},
+    {
+        "name": "SETTINGS_DB",
+        "label": "Settings DB",
+        "group": "storage",
+        "restart": True,
+        "help": "The currently open settings database cannot move until restart.",
+    },
+    # --- Knowledge base (Kiwix) ---
+    {
+        "name": "KIWIX_URL",
+        "label": "Kiwix URL",
+        "group": "kiwix",
+        "help": "Gateway URL for kiwix-serve.",
+    },
+    {
+        "name": "KIWIX_BOOK",
+        "label": "Kiwix book filter",
+        "group": "kiwix",
+        "help": "Optional single Kiwix book name to search.",
+    },
+    {"name": "KIWIX_CATALOG_URL", "label": "Kiwix catalog URL", "group": "kiwix"},
+    # --- Web & API tools ---
+    {
+        "name": "KAGI_API_KEY",
+        "label": "Kagi API key",
+        "group": "tools",
+        "secret": True,
+        "help": "Enables the web_search MCP tool.",
+    },
+    {"name": "KAGI_SEARCH_URL", "label": "Kagi search URL", "group": "tools"},
+    {"name": "NCBI_API_KEY", "label": "NCBI API key", "group": "tools", "secret": True},
+    {"name": "NCBI_EMAIL", "label": "NCBI email", "group": "tools"},
+    {"name": "NCBI_TOOL", "label": "NCBI tool name", "group": "tools"},
+    {"name": "ARXIV_API_URL", "label": "arXiv API URL", "group": "tools"},
+    {
+        "name": "KB_SEARCH_LIMIT",
+        "label": "Default KB search limit",
+        "group": "tools",
+        "type": "int",
+    },
+    {
+        "name": "WEB_SEARCH_LIMIT",
+        "label": "Default web search limit",
+        "group": "tools",
+        "type": "int",
+    },
+    # --- Vector tier ---
+    {"name": "QDRANT_URL", "label": "Qdrant URL", "group": "vector"},
+    {"name": "QDRANT_COLLECTION", "label": "Qdrant collection", "group": "vector"},
+    {"name": "EMBED_URL", "label": "Embedding URL", "group": "vector"},
+    {"name": "EMBED_MODEL", "label": "Embedding model", "group": "vector"},
+    {"name": "EMBED_DIM", "label": "Embedding dimensions", "group": "vector", "type": "int"},
+    {"name": "RERANK_URL", "label": "Rerank URL", "group": "vector"},
+    {"name": "RERANK_MODEL", "label": "Rerank model", "group": "vector"},
     {
         "name": "HYBRID_VECTOR_CANDIDATES",
         "label": "Vector candidates",
+        "group": "vector",
         "type": "int",
     },
     {
         "name": "HYBRID_KIWIX_CANDIDATES",
         "label": "Kiwix candidates",
+        "group": "vector",
         "type": "int",
     },
-    {"name": "CHUNK_MAX_CHARS", "label": "Chunk max chars", "type": "int"},
-    {"name": "CHUNK_OVERLAP_CHARS", "label": "Chunk overlap chars", "type": "int"},
-    {"name": "STATE_DB", "label": "Ingest state DB"},
+    # --- Ingest & chunking ---
+    {"name": "CHUNK_MAX_CHARS", "label": "Chunk max chars", "group": "ingest", "type": "int"},
     {
-        "name": "SETTINGS_DB",
-        "label": "Settings DB",
-        "restart": True,
-        "help": "The currently open settings database cannot move until restart.",
+        "name": "CHUNK_OVERLAP_CHARS",
+        "label": "Chunk overlap chars",
+        "group": "ingest",
+        "type": "int",
     },
+    # --- Server ---
     {
         "name": "ADMIN_HOST",
         "label": "Admin host",
+        "group": "server",
         "restart": True,
         "help": "The server bind address changes only after restart.",
     },
     {
         "name": "ADMIN_PORT",
         "label": "Admin port",
+        "group": "server",
         "type": "int",
         "restart": True,
         "help": "The server bind port changes only after restart.",
     },
-    {"name": "LIBRARY_XML_PATH", "label": "Kiwix library.xml path"},
-    {"name": "KIWIX_DATA_DIR", "label": "Kiwix container data path"},
-    {"name": "KIWIX_CATALOG_URL", "label": "Kiwix catalog URL"},
 )
 
+CONFIG_GROUP_KEYS = tuple(key for key, _label in CONFIG_GROUPS)
 CONFIG_FIELD_NAMES = tuple(field["name"] for field in CONFIG_FIELDS)
 INT_CONFIG_FIELDS = {
     field["name"] for field in CONFIG_FIELDS if field.get("type") == "int"

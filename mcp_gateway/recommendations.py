@@ -26,7 +26,13 @@ class Recommendation:
     rationale: str
     query: str
     lang: str = "eng"
-    count: int = 30
+    count: int = 50
+    # Preferred canonical ZIM names, in priority order. The OPDS `q` search only
+    # matches whole tokens (e.g. "stack" hits stackoverflow.com_en_all, but the
+    # multi-word "wikipedia english nopic" matches nothing), so we search on one
+    # broad token and pin the exact ZIM here. Falls back to score_entry ranking
+    # when none of these are present.
+    match_names: tuple[str, ...] = ()
     prefer_terms: tuple[str, ...] = ()
     avoid_terms: tuple[str, ...] = ("mini",)
 
@@ -46,30 +52,40 @@ RECOMMENDATIONS: tuple[Recommendation, ...] = (
     Recommendation(
         key="wikipedia-en",
         label="English Wikipedia",
-        rationale="Broad offline reference coverage for general questions.",
-        query="wikipedia english nopic",
-        prefer_terms=("wikipedia", "en", "nopic", "all"),
+        rationale="Broad offline reference coverage for general questions. Full-text indexed.",
+        query="wikipedia",
+        match_names=("wikipedia_en_all",),
+        prefer_terms=("wikipedia", "en", "all"),
     ),
     Recommendation(
         key="stackoverflow",
         label="Stack Overflow",
-        rationale="Programming Q&A that works well with lexical kb_search.",
-        query="stackoverflow",
+        rationale=(
+            "Programming Q&A — the canonical coding corpus. Note: the Kiwix build "
+            "ships without a full-text index, so kb_search matches titles only."
+        ),
+        query="stack",
+        match_names=("stackoverflow.com_en_all",),
         prefer_terms=("stackoverflow", "stack_exchange"),
     ),
     Recommendation(
-        key="devdocs-python",
+        key="python-docs",
         label="Python documentation",
-        rationale="Compact Python reference docs for coding workflows.",
-        query="devdocs python",
-        prefer_terms=("devdocs", "python"),
+        rationale="Official Python docs (docs.python.org). Full-text indexed.",
+        query="python",
+        match_names=("docs.python.org_en_all",),
+        prefer_terms=("python", "docs"),
     ),
     Recommendation(
         key="devdocs-web",
-        label="Web documentation",
-        rationale="JavaScript or web platform docs for frontend and scripting questions.",
-        query="devdocs javascript mdn",
-        prefer_terms=("devdocs", "javascript", "mdn", "web"),
+        label="Web / JavaScript documentation",
+        rationale=(
+            "DevDocs JavaScript reference for frontend work. No full-text index; "
+            "best browsed or used as a curated vector source."
+        ),
+        query="javascript",
+        match_names=("devdocs_en_javascript",),
+        prefer_terms=("devdocs", "javascript", "web"),
     ),
 )
 
@@ -130,14 +146,47 @@ def score_entry(entry: CatalogEntry, recommendation: Recommendation) -> int:
     return score
 
 
+def _dedupe(entries: list[CatalogEntry]) -> list[CatalogEntry]:
+    """The catalog feed repeats the same ZIM (one row per flavour/mirror). Keep
+    the first occurrence of each name so scoring/matching isn't skewed by dupes."""
+    unique: dict[str, CatalogEntry] = {}
+    for entry in entries:
+        if entry.name not in unique:
+            unique[entry.name] = entry
+    return list(unique.values())
+
+
 def best_entry(
     entries: list[CatalogEntry], recommendation: Recommendation
 ) -> CatalogEntry | None:
-    scored = [(score_entry(entry, recommendation), entry) for entry in entries]
-    valid = [(score, entry) for score, entry in scored if score >= 0]
-    if not valid:
+    """Best downloadable match by score.
+
+    Only entries without a download URL are excluded — a missing full-text index
+    (common for Stack Overflow / DevDocs ZIMs) lowers the score but must not make
+    the recommendation vanish, or the whole tab reads "unavailable". The UI badges
+    the index status so the tradeoff is visible.
+    """
+    downloadable = [e for e in entries if e.download_url]
+    if not downloadable:
         return None
-    return max(valid, key=lambda item: item[0])[1]
+    return max(downloadable, key=lambda entry: score_entry(entry, recommendation))
+
+
+def pick_entry(
+    entries: list[CatalogEntry], recommendation: Recommendation
+) -> CatalogEntry | None:
+    """Resolve a recommendation to one catalog entry: prefer an exact (then
+    substring) match against the recommendation's pinned canonical names, and
+    otherwise fall back to the best-scored downloadable entry."""
+    downloadable = [e for e in _dedupe(entries) if e.download_url]
+    for wanted in recommendation.match_names:
+        for entry in downloadable:
+            if entry.name == wanted:
+                return entry
+        for entry in downloadable:
+            if wanted in entry.name:
+                return entry
+    return best_entry(downloadable, recommendation)
 
 
 async def resolve_recommendation(
@@ -156,7 +205,7 @@ async def resolve_recommendation(
         )
     return ResolvedRecommendation(
         recommendation=recommendation,
-        entry=best_entry(entries, recommendation),
+        entry=pick_entry(entries, recommendation),
     )
 
 
