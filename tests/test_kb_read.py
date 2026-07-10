@@ -129,6 +129,83 @@ def test_kb_read_refuses_foreign_host_without_fetching(monkeypatch):
     assert "kb_read error" in result
 
 
+def test_kb_read_refuses_redirect_to_foreign_host(monkeypatch):
+    # SSRF guard: a response *from* the kiwix host must not be able to bounce
+    # kb_read to another host via a Location header.
+    _set_kiwix(monkeypatch)
+    fetched: list[str] = []
+
+    async def fetch(url: str) -> httpx.Response:
+        fetched.append(url)
+        return httpx.Response(
+            302,
+            headers={"location": "http://evil.example/steal"},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(kb_read_mod, "_fetch_html", fetch)
+    result = asyncio.run(kb_read("http://kiwix:8080/content/wikipedia_en/A/X"))
+
+    assert "refusing to follow" in result
+    assert "evil.example" in result
+    # The foreign target was never requested.
+    assert fetched == ["http://kiwix:8080/content/wikipedia_en/A/X"]
+
+
+def test_kb_read_follows_same_host_redirect(monkeypatch):
+    # kiwix legitimately redirects /content URLs to canonical article paths;
+    # same-host hops must still work with manual redirect handling.
+    _set_kiwix(monkeypatch)
+    fetched: list[str] = []
+
+    async def fetch(url: str) -> httpx.Response:
+        fetched.append(url)
+        if len(fetched) == 1:
+            return httpx.Response(
+                302,
+                headers={"location": "/content/wikipedia_en/A/Canonical"},
+                request=httpx.Request("GET", url),
+            )
+        return httpx.Response(200, text=_HTML, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(kb_read_mod, "_fetch_html", fetch)
+    result = asyncio.run(kb_read("http://kiwix:8080/content/wikipedia_en/A/X"))
+
+    assert "First paragraph about symptoms." in result
+    assert fetched == [
+        "http://kiwix:8080/content/wikipedia_en/A/X",
+        "http://kiwix:8080/content/wikipedia_en/A/Canonical",
+    ]
+
+
+def test_kb_read_gives_up_on_redirect_loop(monkeypatch):
+    _set_kiwix(monkeypatch)
+
+    async def fetch(url: str) -> httpx.Response:
+        return httpx.Response(
+            302,
+            headers={"location": url},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(kb_read_mod, "_fetch_html", fetch)
+    result = asyncio.run(kb_read("http://kiwix:8080/content/wikipedia_en/A/Loop"))
+    assert "kb_read error" in result
+
+
+def test_kb_read_ignores_non_positive_window_size(monkeypatch):
+    # Regression: KB_READ_WINDOW_CHARS=0 paged zero chars and told the model to
+    # retry at offset=0 forever. Non-positive values fall back to the default.
+    _set_kiwix(monkeypatch)
+    monkeypatch.setattr(kb_read_mod, "_fetch_html", _fake_fetch(_HTML))
+    for bad_size in (0, -100):
+        monkeypatch.setattr("mcp_gateway.config.KB_READ_WINDOW_CHARS", bad_size)
+        result = asyncio.run(kb_read("http://kiwix:8080/content/wikipedia_en/A/X"))
+        assert "characters 0-0" not in result
+        assert "offset=0" not in result
+        assert "[end of article]" in result  # article is far smaller than 4000
+
+
 def test_kb_read_reports_missing_article(monkeypatch):
     _set_kiwix(monkeypatch)
     monkeypatch.setattr(kb_read_mod, "_fetch_html", _fake_fetch("gone", status_code=404))

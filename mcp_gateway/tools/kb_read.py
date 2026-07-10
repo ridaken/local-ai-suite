@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 from .. import config
+
+# Fallback window size when KB_READ_WINDOW_CHARS is set to a non-positive value.
+_DEFAULT_WINDOW = 4000
 
 # Tags whose text content is never article prose.
 _SKIP_TAGS = {"script", "style", "noscript", "head", "template"}
@@ -81,6 +84,13 @@ def extract_text(html: str) -> tuple[str, str]:
     return parser.title.strip(), parser.text()
 
 
+def _on_kiwix_host(url: str) -> bool:
+    """True only for URLs on the configured KIWIX_URL scheme + host + port."""
+    kiwix = urlsplit(config.KIWIX_URL)
+    parsed = urlsplit(url)
+    return parsed.scheme == kiwix.scheme and parsed.netloc == kiwix.netloc
+
+
 def content_url(source: str) -> str | None:
     """Map a kb_search citation URL to the kiwix content endpoint to fetch.
 
@@ -89,9 +99,8 @@ def content_url(source: str) -> str | None:
     (/viewer#<book>/<path>, what kiwix search results link to) and direct
     /content/<book>/<path> URLs.
     """
-    kiwix = urlsplit(config.KIWIX_URL)
     parsed = urlsplit(source.strip())
-    if parsed.scheme != kiwix.scheme or parsed.netloc != kiwix.netloc:
+    if not _on_kiwix_host(source.strip()):
         return None
     if parsed.fragment and parsed.path.rstrip("/").endswith("viewer"):
         return f"{config.KIWIX_URL}/content/{parsed.fragment.lstrip('/')}"
@@ -110,9 +119,34 @@ def window(text: str, offset: int, size: int) -> tuple[str, int, int, int]:
     return text[start:end], start, end, total
 
 
+class ForeignRedirectError(Exception):
+    """The kiwix host tried to redirect kb_read off the kiwix host."""
+
+
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
+_MAX_REDIRECTS = 5
+
+
 async def _fetch_html(url: str) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True) as client:
+    """One request, no automatic redirects — redirect policy lives in
+    _fetch_article so every hop is host-validated."""
+    async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=False) as client:
         return await client.get(url, headers={"User-Agent": config.USER_AGENT})
+
+
+async def _fetch_article(url: str) -> httpx.Response:
+    """Fetch with manual redirect following, re-validating the host at every
+    hop. httpx's automatic following would happily leave the kiwix host on a
+    Location header, silently defeating content_url's validation."""
+    for _ in range(_MAX_REDIRECTS + 1):
+        resp = await _fetch_html(url)
+        if resp.status_code not in _REDIRECT_CODES:
+            return resp
+        target = urljoin(url, resp.headers.get("location", ""))
+        if not _on_kiwix_host(target):
+            raise ForeignRedirectError(target)
+        url = target
+    raise httpx.TooManyRedirects(f"more than {_MAX_REDIRECTS} redirects", request=resp.request)
 
 
 async def kb_read(source: str, offset: int = 0) -> str:
@@ -125,7 +159,12 @@ async def kb_read(source: str, offset: int = 0) -> str:
         )
 
     try:
-        resp = await _fetch_html(url)
+        resp = await _fetch_article(url)
+    except ForeignRedirectError as exc:
+        return (
+            "kb_read error: the knowledge base redirected outside its own host "
+            f"({exc}) — refusing to follow."
+        )
     except httpx.HTTPError as exc:
         return f"kb_read error: could not reach the knowledge base ({exc})."
     if resp.status_code == 404:
@@ -140,7 +179,10 @@ async def kb_read(source: str, offset: int = 0) -> str:
     if not text:
         return f"kb_read: no readable text at {source}."
 
-    body, start, end, total = window(text, offset, config.KB_READ_WINDOW_CHARS)
+    # A non-positive window would page 0 chars and tell the model to retry at
+    # the same offset forever; treat it as misconfiguration and use the default.
+    size = config.KB_READ_WINDOW_CHARS if config.KB_READ_WINDOW_CHARS > 0 else _DEFAULT_WINDOW
+    body, start, end, total = window(text, offset, size)
     if start >= total:
         return (
             f"kb_read: offset {offset} is past the end of this article "
