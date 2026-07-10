@@ -89,6 +89,12 @@ nav.subnav a{display:inline-block;margin-right:.5rem;padding:.2rem .7rem;border-
   color:#7db9e8;text-decoration:none;font-size:.85rem}
 nav.subnav a:hover{background:rgba(125,185,232,.15)}
 nav.subnav a.active{background:#7db9e8;color:#0e0e10;font-weight:600}
+nav.section-tabs{display:flex;flex-wrap:wrap;gap:.15rem;margin:.75rem 0 1rem;
+  border-bottom:1px solid #333}
+nav.section-tabs a{padding:.35rem .8rem;color:#7db9e8;text-decoration:none;font-size:.88rem;
+  border-bottom:2px solid transparent;margin-bottom:-1px}
+nav.section-tabs a:hover{color:#a9d4f5}
+nav.section-tabs a.active{color:inherit;font-weight:600;border-bottom-color:#7db9e8}
 main{padding:1.5rem;max-width:960px;margin:0 auto}
 h2{font-size:1.1rem;margin-top:2rem}
 table{width:100%;border-collapse:collapse;margin:.75rem 0}
@@ -491,8 +497,15 @@ def build_admin_app(
         settings.set_rerank_enabled(form.get("rerank") == "1")
         return RedirectResponse("/settings", status_code=303)
 
+    def _config_section(request: Request) -> str:
+        section = request.query_params.get("section", "")
+        if section not in config.CONFIG_GROUP_KEYS:
+            return config.CONFIG_GROUP_KEYS[0]
+        return section
+
     async def configuration_page(request: Request) -> HTMLResponse:
         saved = settings.config_values()
+        section = _config_section(request)
 
         def row(field: dict[str, object]) -> str:
             name = str(field["name"])
@@ -519,42 +532,54 @@ def build_admin_app(
                 f"{help_html}</td></tr>"
             )
 
-        rows = "".join(row(field) for field in config.CONFIG_FIELDS)
+        section_tabs = "".join(
+            f'<a class="{"active" if key == section else ""}" '
+            f'href="/configuration?section={key}">{html.escape(label)}</a>'
+            for key, label in config.CONFIG_GROUPS
+        )
+        rows = "".join(
+            row(field) for field in config.CONFIG_FIELDS if field.get("group") == section
+        )
         body = f"""
         <h2>Gateway configuration</h2>
         <p class="muted">Values saved here override environment/config file values for the gateway.
         Most tool endpoints and API keys apply immediately; bind addresses, ports, settings database
         moves, and Docker volume paths still need a restart or compose recreation.</p>
+        <nav class="section-tabs">{section_tabs}</nav>
         <form method="post" action="/configuration/update">
+          <input type="hidden" name="section" value="{html.escape(section)}">
           <table><tr><th>Setting</th><th>Value</th></tr>{rows}</table>
-          <button type="submit">Save configuration</button>
+          <button type="submit">Save this section</button>
         </form>
         """
         return _render(request, "Configuration", body)
 
     async def configuration_update(request: Request) -> RedirectResponse:
         form = await request.form()
+        section = str(form.get("section", ""))
+        if section not in config.CONFIG_GROUP_KEYS:
+            section = config.CONFIG_GROUP_KEYS[0]
         saved = settings.config_values()
-        values: dict[str, str] = {}
+        # Start from every persisted value so saving one section never blanks the
+        # fields on the others (they aren't submitted with this form).
+        values: dict[str, str] = dict(saved)
         for field in config.CONFIG_FIELDS:
+            if field.get("group") != section:
+                continue
             name = str(field["name"])
             value = str(form.get(name, ""))
             if field.get("secret") and not value:
-                if name in saved:
-                    values[name] = saved[name]
-                continue
+                continue  # keep the existing secret (already in values via saved)
             if field.get("type") == "int":
                 try:
                     value = str(int(value.strip()))
                 except ValueError:
-                    if name in saved:
-                        values[name] = saved[name]
-                    continue
+                    continue  # keep the existing value on a bad int
             settings.set_config_value(name, value)
             values[name] = value
         config.apply_runtime_overrides(values)
         _refresh_library()
-        return RedirectResponse("/configuration", status_code=303)
+        return RedirectResponse(f"/configuration?section={section}", status_code=303)
 
     return Starlette(
         routes=[
