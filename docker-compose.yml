@@ -95,3 +95,34 @@ services:
     volumes:
       # Read-write: the admin UI downloads/deletes ZIMs and writes library.xml here.
       - "${ZIM_DIR:-./data/zim}:/data"
+
+  # mcpo bridges the gateway's MCP-over-HTTP endpoint into a plain OpenAPI tool
+  # server, which is how OpenWebUI consumes tools. It connects to the *running*
+  # gateway (one source of truth — it honors the admin UI's per-book toggles)
+  # rather than spawning a second stdio gateway. pi talks to /mcp directly and
+  # does not need this.
+  #
+  # Published on the host so an OpenWebUI container on Docker's default bridge
+  # network can reach it at http://host.docker.internal:${MCPO_PORT}. That makes
+  # this an unauthenticated-by-default surface on your LAN, so it is protected by
+  # MCPO_API_KEY — set one in config/.env. In OpenWebUI, register
+  # http://host.docker.internal:8000 as an OpenAPI tool server with that key.
+  mcpo:
+    image: ghcr.io/open-webui/mcpo:main
+    container_name: las-mcpo
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    ports:
+      - "${MCPO_PORT:-8000}:8000"
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--api-key"
+      - "${MCPO_API_KEY:-change-me}"
+      - "--server-type"
+      - "streamablehttp"
+      - "--"
+      - "http://gateway:8090/mcp"
