@@ -107,6 +107,10 @@ matter more than corpus size).
   - `kb_search(query, k)` — **hybrid local retrieval**: query Kiwix FTS *and*
     Qdrant in parallel → merge → **rerank** with bge-reranker → return top-k
     passages **with source + URL + date** (provenance for citation).
+  - `kb_read(source, offset)` — **search-then-read**: kb_search returns short
+    snippet previews; the model passes a result's source URL back to read the
+    full article in ~4K-char windows, paging with `offset` until satisfied.
+    Restricted to the kiwix host (it must not be a generic fetch tool).
   - `web_search(query)` — SearXNG/Kagi.
   - `pubmed_search(query)` — NCBI E-utilities (live, always current).
   - `arxiv_search(query)` — arXiv API (live).

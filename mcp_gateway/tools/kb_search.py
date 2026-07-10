@@ -12,13 +12,21 @@ from retrieval.hybrid import Candidate, hybrid_search
 
 from .. import config
 
+# Lexical hits are trimmed to a preview — kb_read exists to pull the full
+# article. Curated vector chunks are NOT trimmed: they were already sized at
+# ingest (CHUNK_MAX_CHARS) and their file-path citations aren't kb_read-able,
+# so the chunk itself is all the model will ever see of them.
+_KB_SNIPPET_CHARS = 400
+
 
 def _format(query: str, candidates: list[Candidate], warning: str | None = None) -> str:
     lines = [f'Knowledge base results for "{query}":', ""]
     if warning:
         lines += [f"Warning: partial results ({warning}).", ""]
     for i, c in enumerate(candidates, start=1):
-        snippet = c.text if len(c.text) <= 400 else c.text[:397] + "..."
+        snippet = c.text
+        if c.source == "kb" and len(snippet) > _KB_SNIPPET_CHARS:
+            snippet = snippet[: _KB_SNIPPET_CHARS - 3] + "..."
         lines.append(f"{i}. [{c.source}] {c.title}")
         if snippet:
             lines.append(f"   {snippet}")
@@ -26,6 +34,11 @@ def _format(query: str, candidates: list[Candidate], warning: str | None = None)
             lines.append(f"   source: {c.citation}")
         lines.append("")
     lines.append("Cite the source paths / URLs above.")
+    if any(c.source == "kb" for c in candidates):
+        lines.append(
+            "Snippets are short previews — call kb_read with a result's source "
+            "URL to read the full article."
+        )
     return "\n".join(lines).rstrip()
 
 
