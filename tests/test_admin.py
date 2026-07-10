@@ -468,10 +468,16 @@ def test_configuration_update_keeps_blank_secret_and_rejects_invalid_int(tmp_pat
     settings.set_config_value("KB_SEARCH_LIMIT", "9")
     monkeypatch.setattr(admin.config, "KAGI_API_KEY", "existing-secret")
     monkeypatch.setattr(admin.config, "KB_SEARCH_LIMIT", 9)
+    data = {
+        name: str(getattr(admin.config, name, ""))
+        for name in admin.config.CONFIG_FIELD_NAMES
+    }
+    data["KAGI_API_KEY"] = ""
+    data["KB_SEARCH_LIMIT"] = "not-an-int"
 
     resp = client.post(
         "/configuration/update",
-        data={"KAGI_API_KEY": "", "KB_SEARCH_LIMIT": "not-an-int"},
+        data=data,
         follow_redirects=False,
     )
 
