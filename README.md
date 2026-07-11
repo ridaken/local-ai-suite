@@ -146,6 +146,10 @@ UI's per-book toggles) and exposes every tool as an OpenAPI path.
 Ask a Wikipedia-answerable question and the model should call `kb_search` (then
 `kb_read` for detail) and answer with a citation.
 
+For the system prompt and settings that make the model actually *use* retrieval
+well (verify-and-cite behaviour, Native function calling, tool scoping), plus the
+OpenWebUI-vs-pi split, see [docs/prompts.md](docs/prompts.md).
+
 > To run the bridge without Docker instead, install mcpo and point it at the
 > gateway: `mcpo --port 8000 --server-type streamablehttp -- http://localhost:8090/mcp`.
 
