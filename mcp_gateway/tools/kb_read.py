@@ -18,6 +18,8 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
+from retrieval.lexical import QUERY_FILLER
+
 from .. import config
 
 # Fallback window size when KB_READ_WINDOW_CHARS is set to a non-positive value.
@@ -126,8 +128,11 @@ def window(text: str, offset: int, size: int) -> tuple[str, int, int, int]:
 
 
 # Short/function words that shouldn't drive excerpt placement — otherwise a
-# query like "symptoms of hypothyroidism" could center on the first "of".
-_EXCERPT_STOPWORDS = frozenset(
+# query like "symptoms of hypothyroidism" could center on the first "of". Also
+# folds in the conversational-filler set (fun/facts/random/tell...) so that a
+# query the model phrased as "Roman Empire fun facts" doesn't center the excerpt
+# on a stray "fun facts" citation instead of the Roman Empire itself.
+_EXCERPT_STOPWORDS = QUERY_FILLER | frozenset(
     "a an and are as at be by for from how in is of on or that the to what when "
     "where which who why with".split()
 )
