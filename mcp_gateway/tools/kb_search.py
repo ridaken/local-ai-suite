@@ -36,7 +36,7 @@ async def _enrich_kb_excerpts(query: str, candidates: list[Candidate]) -> None:
         *(article_excerpt(c.citation, query, _KB_EXCERPT_CHARS) for c in kb),
         return_exceptions=True,
     )
-    for candidate, excerpt in zip(kb, excerpts):
+    for candidate, excerpt in zip(kb, excerpts, strict=True):
         if isinstance(excerpt, str) and excerpt:
             candidate.text = excerpt
 
