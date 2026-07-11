@@ -13,6 +13,15 @@ _SEARCH_XML = """<?xml version="1.0" encoding="UTF-8"?>
     <description>A black hole is a region of spacetime.</description></item>
 </channel></rss>"""
 
+# Kiwix highlights matched terms with <b>, so <description> has child elements.
+_HIGHLIGHTED_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>Search: symptoms of hypothyroidism</title>
+  <item><title>Hypothyroidism</title><link>/content/b/A/Hypothyroidism</link>
+    <description>...<b>of</b> hypothyroidism include tiredness, weight gain,
+    dry skin, and feeling <b>cold</b>.</description></item>
+</channel></rss>"""
+
 
 def _capture_transport():
     """An httpx transport that records the request and returns fixed search XML."""
@@ -61,6 +70,33 @@ def test_kiwix_search_uses_books_filter_name_param(monkeypatch):
     assert "books.name" not in params
     assert params.get_list("books.filter.name") == ["book_a", "book_b"]
     assert len(hits) == 1 and hits[0].title == "Black hole"
+
+
+def test_kiwix_search_captures_highlighted_snippet_text(monkeypatch):
+    # Regression: kiwix wraps matched terms in <b>, so findtext("description")
+    # returned only the leading "..." (text before the first child), leaving the
+    # model with empty snippets. The full snippet text must survive.
+    transport, _seen = _capture_transport()
+
+    def handler(request):
+        return httpx.Response(200, text=_HIGHLIGHTED_XML)
+
+    transport = httpx.MockTransport(handler)
+    orig = lexical.httpx.AsyncClient
+    monkeypatch.setattr(
+        lexical.httpx,
+        "AsyncClient",
+        lambda *a, **k: orig(*a, **{**k, "transport": transport}),
+    )
+
+    hits = asyncio.run(lexical.kiwix_search("symptoms of hypothyroidism", 5))
+
+    assert len(hits) == 1
+    snippet = hits[0].snippet
+    assert "hypothyroidism include tiredness" in snippet
+    assert "feeling cold" in snippet
+    assert "<b>" not in snippet  # tags stripped
+    assert snippet != "..."  # the exact old-bug symptom
 
 
 def test_kiwix_search_single_book_config_uses_filter_name(monkeypatch):

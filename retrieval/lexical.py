@@ -31,6 +31,19 @@ def _clean(text: str | None) -> str:
     return _WS_RE.sub(" ", _TAG_RE.sub(" ", text)).strip()
 
 
+def _element_text(el: ET.Element | None) -> str:
+    """All text inside an element, including the text of and after child tags.
+
+    Kiwix wraps matched terms in the snippet in <b>…</b>, so <description> has
+    child elements. ElementTree's .text / findtext return only the text *before
+    the first child* — for a highlighted snippet that is just the leading "…",
+    which is why snippets came back effectively empty. itertext() flattens the
+    element's whole text content (the <b> tags drop out as we only keep text)."""
+    if el is None:
+        return ""
+    return "".join(el.itertext())
+
+
 def _absolute(url: str) -> str:
     if url.startswith("http://") or url.startswith("https://"):
         return url
@@ -79,7 +92,7 @@ async def kiwix_search(query: str, limit: int, books: list[str] | None = None) -
             Hit(
                 title=_clean(item.findtext("title")) or "(untitled)",
                 url=_absolute(_clean(item.findtext("link"))),
-                snippet=_clean(item.findtext("description")),
+                snippet=_clean(_element_text(item.find("description"))),
             )
         )
     return hits
