@@ -122,15 +122,32 @@ Example stdio server config:
 }
 ```
 
-For OpenWebUI, use `mcpo` to bridge this stdio server into an OpenAPI tool
-server:
+### OpenWebUI
 
-```powershell
-pip install mcpo
-mcpo --port 8000 -- C:/Users/Tom/Documents/Repos/local-ai-suite/.venv/Scripts/python.exe -m mcp_gateway.server
-```
+OpenWebUI consumes tools as an OpenAPI server, so it needs the `mcpo` bridge in
+front of the gateway. The stack ships an `mcpo` service that does this for you —
+it connects to the running gateway's `/mcp` endpoint (so it honors the admin
+UI's per-book toggles) and exposes every tool as an OpenAPI path.
 
-Then add `http://localhost:8000` as a tool connection in OpenWebUI.
+1. Set `MCPO_API_KEY` in `config/.env` to a long random string (the bridge is
+   published on the host, so this key is what keeps your LAN from calling the
+   tools). `docker compose up -d` starts `las-mcpo` on `MCPO_PORT` (default
+   `8000`).
+2. In OpenWebUI, go to **Settings → Tools → Add Connection** and add:
+   - URL: `http://host.docker.internal:8000` (OpenWebUI runs in a container, so
+     `localhost` there is not your host — use `host.docker.internal`; if
+     OpenWebUI runs directly on the host, `http://localhost:8000` is fine).
+   - API key: the `MCPO_API_KEY` value.
+3. OpenWebUI must have a **chat model that supports tool calling** configured
+   (e.g. your llama-server as an OpenAI-compatible connection). Tool calling is
+   driven by the model, so without one the tools will be registered but never
+   invoked.
+
+Ask a Wikipedia-answerable question and the model should call `kb_search` (then
+`kb_read` for detail) and answer with a citation.
+
+> To run the bridge without Docker instead, install mcpo and point it at the
+> gateway: `mcpo --port 8000 --server-type streamablehttp -- http://localhost:8090/mcp`.
 
 ## Optional: Live Web Search
 

@@ -130,6 +130,21 @@ KIWIX_CATALOG_URL = os.environ.get(
     "KIWIX_CATALOG_URL", "https://library.kiwix.org/catalog/v2/entries"
 ).strip()
 
+# DNS-rebinding allowlist for the MCP streamable-HTTP endpoint. The MCP SDK
+# rejects any Host header not in this list with HTTP 421, so it must cover every
+# way a client addresses the gateway: loopback for host/pi, and the compose
+# service/container names for the mcpo bridge (mcpo connects to `gateway:8090`).
+# A wildcard-port suffix (`:*`) matches any port. Set to "*" to disable the check
+# entirely (only on a trusted network). Defaults cover the shipped compose stack.
+MCP_ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get(
+        "MCP_ALLOWED_HOSTS",
+        "127.0.0.1:*,localhost:*,[::1]:*,gateway:*,las-gateway:*",
+    ).split(",")
+    if h.strip()
+]
+
 
 # Configuration is presented in logical sub-tabs on the admin page rather than
 # one long form. CONFIG_GROUPS is the ordered (key, label) list of those tabs;

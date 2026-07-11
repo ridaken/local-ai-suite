@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
 from . import config, zim_library
@@ -34,7 +35,25 @@ from .tools.kb_search import kb_search as _kb_search
 from .tools.pubmed import pubmed_search as _pubmed_search
 from .tools.web_search import web_search as _web_search
 
-mcp = FastMCP("local-ai-suite")
+
+def _transport_security() -> TransportSecuritySettings:
+    """Build the /mcp DNS-rebinding policy from config.MCP_ALLOWED_HOSTS.
+
+    Without this, FastMCP auto-enables a localhost-only allowlist, and the mcpo
+    bridge (which connects as `gateway:8090` over the compose network) is
+    rejected with HTTP 421. "*" disables the check for trusted networks.
+    """
+    hosts = config.MCP_ALLOWED_HOSTS
+    if "*" in hosts:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=[f"http://{h}" for h in hosts],
+    )
+
+
+mcp = FastMCP("local-ai-suite", transport_security=_transport_security())
 
 
 @mcp.tool()
