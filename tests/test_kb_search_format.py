@@ -15,9 +15,11 @@ def _curated(text: str) -> Candidate:
 
 
 def test_lexical_snippets_are_trimmed_to_preview():
-    out = _format("q", [_kb("x" * 1000)])
-    assert "x" * 397 + "..." in out
-    assert "x" * 398 not in out
+    from mcp_gateway.tools.kb_search import _KB_SNIPPET_CHARS
+
+    out = _format("q", [_kb("x" * 2000)])
+    assert "x" * (_KB_SNIPPET_CHARS - 3) + "..." in out
+    assert "x" * (_KB_SNIPPET_CHARS + 1) not in out
 
 
 def test_curated_chunks_pass_through_whole():

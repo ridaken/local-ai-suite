@@ -119,6 +119,71 @@ def window(text: str, offset: int, size: int) -> tuple[str, int, int, int]:
     return text[start:end], start, end, total
 
 
+# Short/function words that shouldn't drive excerpt placement — otherwise a
+# query like "symptoms of hypothyroidism" could center on the first "of".
+_EXCERPT_STOPWORDS = frozenset(
+    "a an and are as at be by for from how in is of on or that the to what when "
+    "where which who why with".split()
+)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _query_terms(query: str) -> list[str]:
+    return [
+        t for t in _WORD_RE.findall(query.lower()) if len(t) > 2 and t not in _EXCERPT_STOPWORDS
+    ]
+
+
+def best_excerpt(text: str, query: str, size: int) -> str:
+    """A query-relevant window of `text`.
+
+    kiwix's own search snippet centers on the densest match region, which for
+    many queries is a shared navigation/infobox block (all thyroid articles
+    embed the same disease navbox), yielding identical, useless snippets. This
+    instead centers the window on the first place a meaningful query term
+    actually appears in the article body, falling back to the lead.
+    """
+    if not text:
+        return ""
+    lowered = text.lower()
+    # Center on the most *discriminating* query term — the one with the fewest
+    # occurrences — not the first. A term that is also the article title (e.g.
+    # "hypothyroidism") matches at position 0 and everywhere, which would pin the
+    # excerpt to the lead/infobox; the rarer term ("symptoms") marks the section
+    # the query is actually about.
+    present = [(lowered.count(t), lowered.find(t)) for t in _query_terms(query)]
+    present = [(count, pos) for count, pos in present if pos >= 0]
+    idx = min(present)[1] if present else -1
+    if idx < 0:
+        excerpt = text[:size].strip()
+        return excerpt + ("…" if len(text) > size else "")
+    # Back up a little so the term isn't the very first word, snapping to a
+    # word boundary, then take a window forward.
+    start = max(0, idx - 60)
+    if start > 0:
+        space = text.find(" ", start)
+        start = space + 1 if 0 <= space < idx else start
+    end = min(len(text), start + size)
+    excerpt = text[start:end].strip()
+    return ("…" if start > 0 else "") + excerpt + ("…" if end < len(text) else "")
+
+
+async def article_excerpt(source: str, query: str, size: int) -> str | None:
+    """Fetch a kb_search hit's article and return a query-relevant excerpt, or
+    None if it can't be fetched (caller falls back to the kiwix snippet)."""
+    url = content_url(source)
+    if url is None:
+        return None
+    try:
+        resp = await _fetch_article(url)
+    except (httpx.HTTPError, ForeignRedirectError):
+        return None
+    if resp.status_code != 200:
+        return None
+    _title, text = extract_text(resp.text)
+    return best_excerpt(text, query, size) or None
+
+
 class ForeignRedirectError(Exception):
     """The kiwix host tried to redirect kb_read off the kiwix host."""
 
