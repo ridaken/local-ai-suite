@@ -99,6 +99,25 @@ def test_kiwix_search_captures_highlighted_snippet_text(monkeypatch):
     assert snippet != "..."  # the exact old-bug symptom
 
 
+def test_kiwix_search_builds_citation_on_public_host(monkeypatch):
+    # Citation URLs must use the browser-reachable public base, not the internal
+    # service name the gateway fetches through.
+    monkeypatch.setattr(lexical.config, "KIWIX_URL", "http://kiwix:8080")
+    monkeypatch.setattr(lexical.config, "KIWIX_PUBLIC_URL", "http://localhost:8080")
+
+    def handler(request):
+        return httpx.Response(200, text=_SEARCH_XML)
+
+    transport = httpx.MockTransport(handler)
+    orig = lexical.httpx.AsyncClient
+    monkeypatch.setattr(
+        lexical.httpx, "AsyncClient", lambda *a, **k: orig(*a, **{**k, "transport": transport})
+    )
+
+    hits = asyncio.run(lexical.kiwix_search("black hole", 5))
+    assert hits[0].url == "http://localhost:8080/content/b/A/Black_hole"
+
+
 def test_kiwix_search_single_book_config_uses_filter_name(monkeypatch):
     monkeypatch.setattr(lexical.config, "KIWIX_BOOK", "solo_book")
     _hits, seen = _run_with_transport(

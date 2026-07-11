@@ -81,6 +81,10 @@ services:
       # Docker Desktop (Windows/Mac) — this targets the co-located Windows
       # inference PC deployment (see docs/DESIGN.md).
       KIWIX_URL: http://kiwix:8080
+      # Citation links shown to the user/model must be browser-reachable, not the
+      # internal service name. kiwix publishes 8080 on the host, so localhost
+      # works; override KIWIX_PUBLIC_URL in config/.env if you expose it elsewhere.
+      KIWIX_PUBLIC_URL: ${KIWIX_PUBLIC_URL:-http://localhost:8080}
       QDRANT_URL: http://qdrant:6333
       EMBED_URL: http://host.docker.internal:8081/v1/embeddings
       RERANK_URL: http://host.docker.internal:8082/v1/rerank
