@@ -27,7 +27,15 @@ def _int(name: str, default: int) -> int:
 
 # Kiwix (offline KB, full-text search)
 DATA_ROOT = os.environ.get("DATA_ROOT", "").strip()
+# KIWIX_URL is how the gateway reaches kiwix-serve to fetch/search — under
+# docker-compose that's the internal service name (http://kiwix:8080), which is
+# NOT resolvable from a user's browser.
 KIWIX_URL = os.environ.get("KIWIX_URL", "http://localhost:8080").rstrip("/")
+# KIWIX_PUBLIC_URL is the base used when building citation links shown to humans
+# and the model — it must be browser-reachable (e.g. http://localhost:8080 when
+# kiwix's port is published). Defaults to KIWIX_URL. kb_read accepts source URLs
+# on either host and always fetches via the internal KIWIX_URL.
+KIWIX_PUBLIC_URL = (os.environ.get("KIWIX_PUBLIC_URL", "").strip() or KIWIX_URL).rstrip("/")
 KIWIX_BOOK = os.environ.get("KIWIX_BOOK", "").strip()
 
 # Web search (Kagi)

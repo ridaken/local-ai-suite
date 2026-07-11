@@ -45,9 +45,11 @@ def _element_text(el: ET.Element | None) -> str:
 
 
 def _absolute(url: str) -> str:
+    # Citation links go to humans/the model, so build them on the public base,
+    # not the internal service URL the gateway fetches through.
     if url.startswith("http://") or url.startswith("https://"):
         return url
-    return f"{config.KIWIX_URL}/{url.lstrip('/')}"
+    return f"{config.KIWIX_PUBLIC_URL}/{url.lstrip('/')}"
 
 
 async def kiwix_search(query: str, limit: int, books: list[str] | None = None) -> list[Hit]:

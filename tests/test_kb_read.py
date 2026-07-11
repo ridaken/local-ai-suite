@@ -35,6 +35,15 @@ def test_content_url_passes_content_path_through(monkeypatch):
     assert url == "http://kiwix:8080/content/wikipedia_en/A/Hypothyroidism"
 
 
+def test_content_url_accepts_public_host_but_fetches_internal(monkeypatch):
+    # Citations use the public host; kb_read must accept that URL from the model
+    # and rewrite it to the internal host the gateway can actually reach.
+    _set_kiwix(monkeypatch, "http://kiwix:8080")
+    monkeypatch.setattr("mcp_gateway.config.KIWIX_PUBLIC_URL", "http://localhost:8080")
+    url = content_url("http://localhost:8080/content/wikipedia_en/A/Hypothyroidism")
+    assert url == "http://kiwix:8080/content/wikipedia_en/A/Hypothyroidism"
+
+
 def test_content_url_rejects_foreign_host(monkeypatch):
     # The whole security story: kb_read must not be a generic fetch tool.
     _set_kiwix(monkeypatch)

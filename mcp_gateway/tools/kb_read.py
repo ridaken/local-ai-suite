@@ -85,19 +85,25 @@ def extract_text(html: str) -> tuple[str, str]:
 
 
 def _on_kiwix_host(url: str) -> bool:
-    """True only for URLs on the configured KIWIX_URL scheme + host + port."""
-    kiwix = urlsplit(config.KIWIX_URL)
+    """True only for URLs on the internal KIWIX_URL or the public KIWIX_PUBLIC_URL
+    (scheme + host + port). Citations use the public host; the gateway itself and
+    kiwix's own redirects use the internal one — both are legitimate."""
     parsed = urlsplit(url)
-    return parsed.scheme == kiwix.scheme and parsed.netloc == kiwix.netloc
+    allowed = {
+        (urlsplit(base).scheme, urlsplit(base).netloc)
+        for base in (config.KIWIX_URL, config.KIWIX_PUBLIC_URL)
+    }
+    return (parsed.scheme, parsed.netloc) in allowed
 
 
 def content_url(source: str) -> str | None:
-    """Map a kb_search citation URL to the kiwix content endpoint to fetch.
+    """Map a kb_search citation URL to the internal kiwix content endpoint.
 
-    Returns None unless the URL is on the configured KIWIX_URL host — kb_read
-    must not be usable as a generic fetch tool. Handles both the viewer form
-    (/viewer#<book>/<path>, what kiwix search results link to) and direct
-    /content/<book>/<path> URLs.
+    Returns None unless the URL is on the kiwix host (internal or public) —
+    kb_read must not be usable as a generic fetch tool. Always rewrites to the
+    internal KIWIX_URL for the actual fetch, since a citation may use the public
+    host (e.g. localhost:8080) that the gateway container can't resolve. Handles
+    both the viewer form (/viewer#<book>/<path>) and direct /content/... URLs.
     """
     parsed = urlsplit(source.strip())
     if not _on_kiwix_host(source.strip()):
