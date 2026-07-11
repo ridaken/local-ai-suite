@@ -49,6 +49,16 @@ WEB_SEARCH_LIMIT = _int("WEB_SEARCH_LIMIT", 5)
 # kb_read returns article text in windows of this many characters; the model
 # pages through with the offset parameter.
 KB_READ_WINDOW_CHARS = _int("KB_READ_WINDOW_CHARS", 4000)
+# When true, kb_search fetches each top kiwix hit's article and returns a
+# query-relevant excerpt instead of kiwix's own match-snippet (which often lands
+# on a shared navbox/infobox and carries no real content). Costs one local fetch
+# per result; set to 0/false to fall back to the raw kiwix snippet.
+KB_SEARCH_FETCH_EXCERPTS = os.environ.get("KB_SEARCH_FETCH_EXCERPTS", "1").strip() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
 
 # Shared HTTP settings
 HTTP_TIMEOUT = 20.0

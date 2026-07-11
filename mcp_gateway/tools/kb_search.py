@@ -8,15 +8,37 @@ tool's return contract is unchanged — a cited, model-readable string.
 
 from __future__ import annotations
 
+import asyncio
+
 from retrieval.hybrid import Candidate, hybrid_search
 
 from .. import config
+from .kb_read import article_excerpt
 
-# Lexical hits are trimmed to a preview — kb_read exists to pull the full
-# article. Curated vector chunks are NOT trimmed: they were already sized at
-# ingest (CHUNK_MAX_CHARS) and their file-path citations aren't kb_read-able,
-# so the chunk itself is all the model will ever see of them.
-_KB_SNIPPET_CHARS = 400
+# Kiwix hits are shown as a preview — kb_read pulls the full article. Curated
+# vector chunks are NOT trimmed: they were already sized at ingest
+# (CHUNK_MAX_CHARS) and their file-path citations aren't kb_read-able, so the
+# chunk itself is all the model will ever see of them.
+_KB_SNIPPET_CHARS = 600
+# Target length of the fetched query-relevant excerpt (kept under the display
+# cap above so enriched excerpts pass through _format untrimmed).
+_KB_EXCERPT_CHARS = 500
+
+
+async def _enrich_kb_excerpts(query: str, candidates: list[Candidate]) -> None:
+    """Replace kiwix's match-snippet with a fetched, query-relevant excerpt for
+    each kiwix hit. Best-effort: any hit whose article can't be fetched keeps
+    its original snippet."""
+    kb = [c for c in candidates if c.source == "kb" and c.citation]
+    if not kb:
+        return
+    excerpts = await asyncio.gather(
+        *(article_excerpt(c.citation, query, _KB_EXCERPT_CHARS) for c in kb),
+        return_exceptions=True,
+    )
+    for candidate, excerpt in zip(kb, excerpts, strict=True):
+        if isinstance(excerpt, str) and excerpt:
+            candidate.text = excerpt
 
 
 def _format(query: str, candidates: list[Candidate], warning: str | None = None) -> str:
@@ -36,8 +58,10 @@ def _format(query: str, candidates: list[Candidate], warning: str | None = None)
     lines.append("Cite the source paths / URLs above.")
     if any(c.source == "kb" for c in candidates):
         lines.append(
-            "Snippets are short previews — call kb_read with a result's source "
-            "URL to read the full article."
+            "These are excerpts, not full articles. If the answer isn't fully "
+            "contained above, call kb_read with the most relevant source URL to "
+            "read the full article before answering — do not fall back to prior "
+            "knowledge when a relevant source is listed."
         )
     return "\n".join(lines).rstrip()
 
@@ -55,4 +79,6 @@ async def kb_search(query: str, limit: int | None = None) -> str:
                 f"the embedder are reachable."
             )
         return f'No knowledge-base results for "{query}".'
+    if config.KB_SEARCH_FETCH_EXCERPTS:
+        await _enrich_kb_excerpts(query, result.candidates)
     return _format(query, result.candidates, result.warning)
