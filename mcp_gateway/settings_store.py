@@ -13,12 +13,14 @@ a temp file; `default_store()` returns the process-wide instance backed by
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from pathlib import Path
 from threading import Lock
 
 RETRIEVAL_MODES = ("hybrid", "lexical", "vector")
 DEFAULT_RETRIEVAL_MODE = "hybrid"
+SECRET_CONFIG_KEYS = {"KAGI_API_KEY", "NCBI_API_KEY", "ADMIN_TOKEN", "MCP_API_KEY", "MCPO_API_KEY"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -33,14 +35,27 @@ CREATE TABLE IF NOT EXISTS book_toggles (
 
 
 class SettingsStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, read_only: bool = False, initialize: bool = True):
         self.db_path = str(db_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = read_only
         self._lock = Lock()
-        with self._connect() as conn:
-            conn.executescript(_SCHEMA)
+        if initialize:
+            if read_only:
+                raise ValueError("a read-only settings store cannot initialize its schema")
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.closing(self._connect()) as conn:
+                conn.executescript(_SCHEMA)
+                placeholders = ",".join("?" for _key in SECRET_CONFIG_KEYS)
+                conn.execute(
+                    f"DELETE FROM settings WHERE key IN ({placeholders})",  # noqa: S608
+                    [f"config.{key}" for key in SECRET_CONFIG_KEYS],
+                )
+                conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
+        if self.read_only:
+            uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+            return sqlite3.connect(uri, uri=True)
         return sqlite3.connect(self.db_path)
 
     # --- retrieval mode ------------------------------------------------------
@@ -65,23 +80,26 @@ class SettingsStore:
 
     # --- per-book toggles --------------------------------------------------
     def is_book_enabled(self, name: str) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT enabled FROM book_toggles WHERE name = ?", (name,)
             ).fetchone()
         return True if row is None else bool(row[0])  # default: enabled
 
     def set_book_enabled(self, name: str, enabled: bool) -> None:
-        with self._lock, self._connect() as conn:
+        if self.read_only:
+            raise PermissionError("settings store is read-only")
+        with self._lock, contextlib.closing(self._connect()) as conn:
             conn.execute(
                 "INSERT INTO book_toggles (name, enabled) VALUES (?, ?) "
                 "ON CONFLICT(name) DO UPDATE SET enabled = excluded.enabled",
                 (name, int(enabled)),
             )
+            conn.commit()
 
     def book_toggles(self) -> dict[str, bool]:
         """Only explicit overrides — books absent here default to enabled."""
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             rows = conn.execute("SELECT name, enabled FROM book_toggles").fetchall()
         return {name: bool(enabled) for name, enabled in rows}
 
@@ -91,40 +109,57 @@ class SettingsStore:
 
     # --- configuration overrides -------------------------------------------
     def get_config_value(self, key: str) -> str | None:
+        if key in SECRET_CONFIG_KEYS:
+            return None
         return self._get(f"config.{key}")
 
     def set_config_value(self, key: str, value: str) -> None:
+        if key in SECRET_CONFIG_KEYS:
+            raise ValueError(f"{key} must be supplied through environment/secret files")
         self._set(f"config.{key}", value)
 
     def config_values(self) -> dict[str, str]:
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT key, value FROM settings WHERE key LIKE 'config.%'"
             ).fetchall()
-        return {key.removeprefix("config."): value for key, value in rows}
+        return {
+            key.removeprefix("config."): value
+            for key, value in rows
+            if key.removeprefix("config.") not in SECRET_CONFIG_KEYS
+        }
 
     # --- internal --------------------------------------------------------------
     def _get(self, key: str) -> str | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
 
     def _set(self, key: str, value: str) -> None:
-        with self._lock, self._connect() as conn:
+        if self.read_only:
+            raise PermissionError("settings store is read-only")
+        with self._lock, contextlib.closing(self._connect()) as conn:
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+            conn.commit()
 
 
 _default: SettingsStore | None = None
 
 
-def default_store() -> SettingsStore:
+def set_default_store(store: SettingsStore) -> None:
+    """Set the process-wide store used by retrieval helpers."""
+    global _default
+    _default = store
+
+
+def default_store(*, read_only: bool = False, initialize: bool = True) -> SettingsStore:
     global _default
     if _default is None:
         from . import config
 
-        _default = SettingsStore(config.SETTINGS_DB)
+        _default = SettingsStore(config.SETTINGS_DB, read_only=read_only, initialize=initialize)
     return _default

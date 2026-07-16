@@ -12,6 +12,32 @@ from mcp_gateway.recommendations import Recommendation, ResolvedRecommendation
 from mcp_gateway.settings_store import SettingsStore
 from mcp_gateway.zim_library import BookInfo
 
+_ADMIN_TOKEN = "a" * 48
+
+
+class _AuthenticatedClient:
+    def __init__(self, client, app):  # noqa: ANN001
+        self._client = client
+        self._app = app
+
+    def __getattr__(self, name):  # noqa: ANN001, ANN204
+        return getattr(self._client, name)
+
+    def post(self, url, *, data=None, **kwargs):  # noqa: ANN001, ANN201
+        values = dict(data or {})
+        if url != "/login":
+            session_id = self._client.cookies.get("las_admin_session")
+            session = self._app.state.admin_security.sessions[session_id]
+            values.setdefault("csrf_token", session.csrf_token)
+        return self._client.post(url, data=values, **kwargs)
+
+
+def _authenticated(app):  # noqa: ANN001, ANN202
+    raw = TestClient(app)
+    response = raw.post("/login", data={"token": _ADMIN_TOKEN}, follow_redirects=False)
+    assert response.status_code == 303
+    return _AuthenticatedClient(raw, app)
+
 
 def _client(tmp_path, *, download_manager=None):
     zim_dir = tmp_path / "zim"
@@ -23,8 +49,11 @@ def _client(tmp_path, *, download_manager=None):
         download_manager=manager,
         zim_dir=str(zim_dir),
         library_xml_path=str(zim_dir / "library.xml"),
+        admin_token=_ADMIN_TOKEN,
+        allowed_hosts=["testserver"],
+        allowed_origins=["http://testserver"],
     )
-    return TestClient(app), settings, manager, zim_dir
+    return _authenticated(app), settings, manager, zim_dir
 
 
 def _client_no_zim_dir(tmp_path, *, download_manager=None):
@@ -36,8 +65,11 @@ def _client_no_zim_dir(tmp_path, *, download_manager=None):
         download_manager=manager,
         zim_dir="",
         library_xml_path="",
+        admin_token=_ADMIN_TOKEN,
+        allowed_hosts=["testserver"],
+        allowed_origins=["http://testserver"],
     )
-    return TestClient(app), settings, manager
+    return _authenticated(app), settings, manager
 
 
 async def _fake_reachable(url: str) -> str:
@@ -288,7 +320,7 @@ def test_recommendations_page_disables_download_when_zim_dir_unset(tmp_path, mon
     assert "<form method=\"post\" action=\"/sources/download\">" not in resp.text
 
 
-def test_sources_download_registers_a_job(tmp_path):
+def test_sources_download_registers_a_signed_job(tmp_path):
     class _StuckClient:
         async def __aenter__(self):
             return self
@@ -299,12 +331,25 @@ def test_sources_download_registers_a_job(tmp_path):
         def stream(self, method, url, headers=None):
             raise AssertionError("not reached in this test")
 
-    manager = DownloadManager(tmp_path / "zim", http_client_factory=lambda: _StuckClient())
+    manager = DownloadManager(
+        tmp_path / "zim",
+        http_client_factory=lambda: _StuckClient(),
+        min_free_bytes=0,
+        validate_fn=lambda _path: None,
+    )
     client, _settings, mgr, _zd = _client(tmp_path, download_manager=manager)
+    session_id = client.cookies.get("las_admin_session")
+    session = client._app.state.admin_security.sessions[session_id]
+    action = client._app.state.admin_security.issue_download_action(
+        session,
+        url="https://download.kiwix.org/foo.zim",
+        filename="foo.zim",
+        expected_bytes=1,
+    )
 
     resp = client.post(
         "/sources/download",
-        data={"url": "https://example.org/foo.zim", "filename": "foo.zim"},
+        data={"action": action},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -312,37 +357,21 @@ def test_sources_download_registers_a_job(tmp_path):
     jobs = mgr.list_jobs()
     assert len(jobs) == 1
     assert jobs[0].filename == "foo.zim"
-    assert jobs[0].url == "https://example.org/foo.zim"
+    assert jobs[0].url == "https://download.kiwix.org/foo.zim"
 
 
-def test_recommendation_download_registers_a_job(tmp_path):
-    class _StuckClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        def stream(self, method, url, headers=None):
-            raise AssertionError("not reached in this test")
-
-    manager = DownloadManager(tmp_path / "zim", http_client_factory=lambda: _StuckClient())
-    client, _settings, mgr, _zd = _client(tmp_path, download_manager=manager)
+def test_sources_download_rejects_unsigned_fields(tmp_path):
+    client, _settings, manager, _zd = _client(tmp_path)
 
     resp = client.post(
         "/sources/download",
-        data={
-            "url": "https://example.org/devdocs_python.zim",
-            "filename": "devdocs_python.zim",
-        },
+        data={"url": "https://download.kiwix.org/foo.zim", "filename": "foo.zim"},
         follow_redirects=False,
     )
 
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/downloads"
-    jobs = mgr.list_jobs()
-    assert len(jobs) == 1
-    assert jobs[0].filename == "devdocs_python.zim"
+    assert "error=" in resp.headers["location"]
+    assert manager.list_jobs() == []
 
 
 def test_settings_page_reflects_current_values(tmp_path):
@@ -467,7 +496,7 @@ def test_configuration_page_shows_section_tabs_and_default_section(tmp_path):
     resp = client.get("/configuration")
 
     assert resp.status_code == 200
-    assert "Gateway configuration" in resp.text
+    assert "Effective configuration" in resp.text
     assert 'nav class="section-tabs"' in resp.text
     # All six section tabs are present (labels are HTML-escaped in the markup);
     # the first (Storage & paths) is active.
@@ -482,8 +511,7 @@ def test_configuration_page_shows_section_tabs_and_default_section(tmp_path):
 
 
 def test_configuration_section_shows_only_its_fields_and_hides_secrets(tmp_path):
-    client, settings, _mgr, _zim_dir = _client(tmp_path)
-    settings.set_config_value("KAGI_API_KEY", "must-not-appear")
+    client, _settings, _mgr, _zim_dir = _client(tmp_path)
 
     resp = client.get("/configuration", params={"section": "tools"})
 
@@ -492,7 +520,8 @@ def test_configuration_section_shows_only_its_fields_and_hides_secrets(tmp_path)
         in resp.text
     assert "KAGI_API_KEY" in resp.text
     assert "must-not-appear" not in resp.text
-    assert "Leave blank to keep current value" in resp.text
+    assert "configured" in resp.text or "not configured" in resp.text
+    assert "type=\"password\"" not in resp.text
     assert "ZIM_DIR" not in resp.text  # storage section
 
 
@@ -505,61 +534,14 @@ def test_configuration_unknown_section_falls_back_to_first(tmp_path):
     assert '<a class="active" href="/configuration?section=storage">' in resp.text
 
 
-def test_configuration_update_persists_and_applies_section_values(tmp_path, monkeypatch):
+def test_configuration_update_route_is_removed(tmp_path):
     client, settings, _mgr, _zim_dir = _client(tmp_path)
-    monkeypatch.setattr(admin.config, "KAGI_API_KEY", "")
-    monkeypatch.setattr(admin.config, "KB_SEARCH_LIMIT", 5)
-    # KAGI_API_KEY and KB_SEARCH_LIMIT both live in the "tools" section.
-    data = {
-        "section": "tools",
-        "KAGI_API_KEY": "kagi-test-key",
-        "KB_SEARCH_LIMIT": "12",
-    }
-
-    resp = client.post("/configuration/update", data=data, follow_redirects=False)
-
-    assert resp.status_code == 303
-    assert resp.headers["location"] == "/configuration?section=tools"
-    assert settings.get_config_value("KAGI_API_KEY") == "kagi-test-key"
-    assert admin.config.KAGI_API_KEY == "kagi-test-key"
-    assert admin.config.KB_SEARCH_LIMIT == 12
-
-
-def test_configuration_update_keeps_blank_secret_and_rejects_invalid_int(tmp_path, monkeypatch):
-    client, settings, _mgr, _zim_dir = _client(tmp_path)
-    settings.set_config_value("KAGI_API_KEY", "existing-secret")
-    settings.set_config_value("KB_SEARCH_LIMIT", "9")
-    monkeypatch.setattr(admin.config, "KAGI_API_KEY", "existing-secret")
-    monkeypatch.setattr(admin.config, "KB_SEARCH_LIMIT", 9)
-    data = {
-        "section": "tools",
-        "KAGI_API_KEY": "",  # blank secret -> keep existing
-        "KB_SEARCH_LIMIT": "not-an-int",  # invalid int -> keep existing
-    }
-
-    resp = client.post("/configuration/update", data=data, follow_redirects=False)
-
-    assert resp.status_code == 303
-    assert settings.get_config_value("KAGI_API_KEY") == "existing-secret"
-    assert settings.get_config_value("KB_SEARCH_LIMIT") == "9"
-    assert admin.config.KAGI_API_KEY == "existing-secret"
-    assert admin.config.KB_SEARCH_LIMIT == 9
-
-
-def test_configuration_update_one_section_does_not_wipe_another(tmp_path, monkeypatch):
-    # Regression for the section-scoped save: persisting the "tools" section must
-    # not blank a value previously saved in the "kiwix" section, even though that
-    # field isn't part of the submitted form.
-    client, settings, _mgr, _zim_dir = _client(tmp_path)
-    settings.set_config_value("KIWIX_BOOK", "wikipedia_en_all")
-    monkeypatch.setattr(admin.config, "KIWIX_BOOK", "wikipedia_en_all")
 
     resp = client.post(
         "/configuration/update",
-        data={"section": "tools", "KB_SEARCH_LIMIT": "7"},
+        data={"section": "tools", "KAGI_API_KEY": "must-not-persist"},
         follow_redirects=False,
     )
 
-    assert resp.status_code == 303
-    assert settings.get_config_value("KIWIX_BOOK") == "wikipedia_en_all"
-    assert admin.config.KIWIX_BOOK == "wikipedia_en_all"
+    assert resp.status_code == 404
+    assert settings.get_config_value("KAGI_API_KEY") is None
