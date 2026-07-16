@@ -1,6 +1,11 @@
 """Tests for the runtime settings store (retrieval mode, rerank toggle, and
 per-book enable/disable) backing the admin UI."""
 
+import contextlib
+import sqlite3
+
+import pytest
+
 from mcp_gateway.settings_store import SettingsStore
 
 
@@ -73,11 +78,27 @@ def test_settings_persist_across_instances(tmp_path):
 
 def test_config_values_round_trip(tmp_path):
     store = _store(tmp_path)
-    store.set_config_value("KAGI_API_KEY", "secret")
     store.set_config_value("ZIM_DIR", "D:/ai-data/zim")
 
-    assert store.get_config_value("KAGI_API_KEY") == "secret"
-    assert store.config_values() == {
-        "KAGI_API_KEY": "secret",
-        "ZIM_DIR": "D:/ai-data/zim",
-    }
+    assert store.config_values() == {"ZIM_DIR": "D:/ai-data/zim"}
+
+
+def test_secret_config_values_are_rejected(tmp_path):
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="secret files"):
+        store.set_config_value("KAGI_API_KEY", "secret")
+
+
+def test_initialization_removes_legacy_secret_rows(tmp_path):
+    db_path = tmp_path / "settings.db"
+    SettingsStore(db_path)
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?, ?)",
+            ("config.KAGI_API_KEY", "legacy-secret"),
+        )
+        conn.commit()
+
+    cleaned = SettingsStore(db_path)
+    assert cleaned.get_config_value("KAGI_API_KEY") is None
+    assert cleaned.config_values() == {}

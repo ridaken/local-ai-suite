@@ -6,6 +6,8 @@ header with HTTP 421, so the allowlist must be configurable and cover the
 compose service name.
 """
 
+import pytest
+
 from mcp_gateway import config, server
 
 
@@ -24,11 +26,10 @@ def test_transport_security_enables_protection_with_hosts(monkeypatch):
     assert settings.allowed_origins == ["http://localhost:*", "http://gateway:*"]
 
 
-def test_transport_security_wildcard_disables_protection(monkeypatch):
+def test_transport_security_rejects_wildcard(monkeypatch):
     monkeypatch.setattr(config, "MCP_ALLOWED_HOSTS", ["*"])
-    settings = server._transport_security()
-
-    assert settings.enable_dns_rebinding_protection is False
+    with pytest.raises(ValueError, match="may not contain"):
+        server._transport_security()
 
 
 def test_gateway_host_would_be_accepted_by_middleware(monkeypatch):

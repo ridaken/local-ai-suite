@@ -1,17 +1,18 @@
-"""Tests for the resumable background download manager, against a fake httpx
-client (no network) so resume-from-partial-file and error paths are
-deterministic."""
+"""Security and integrity tests for the background ZIM downloader."""
 
 import asyncio
+from collections import namedtuple
 
 import httpx
 import pytest
 
-from mcp_gateway.downloads import DownloadManager, delete_zim
+from mcp_gateway.downloads import DownloadManager, delete_zim, validate_download_url
+
+GOOD_URL = "https://download.kiwix.org/foo.zim"
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, headers: dict, body: bytes):
+    def __init__(self, status_code: int, headers: dict, body: bytes = b""):
         self.status_code = status_code
         self.headers = headers
         self._body = body
@@ -25,19 +26,17 @@ class _FakeResponse:
     def raise_for_status(self):
         if self.status_code >= 400:
             raise httpx.HTTPStatusError(
-                "error",
-                request=httpx.Request("GET", "http://x"),
+                "sensitive upstream detail",
+                request=httpx.Request("GET", GOOD_URL),
                 response=httpx.Response(self.status_code),
             )
 
-    async def aiter_bytes(self, chunk_size=None):
-        # split into two chunks (when possible) to exercise multi-write accumulation
-        if not self._body:
-            return
-        mid = max(1, len(self._body) // 2)
-        yield self._body[:mid]
-        if self._body[mid:]:
-            yield self._body[mid:]
+    async def aiter_bytes(self, chunk_size=None):  # noqa: ARG002
+        midpoint = max(1, len(self._body) // 2)
+        if self._body:
+            yield self._body[:midpoint]
+            if self._body[midpoint:]:
+                yield self._body[midpoint:]
 
 
 def _factory(respond):
@@ -49,96 +48,145 @@ def _factory(respond):
             return False
 
         def stream(self, method, url, headers=None):
-            return respond(headers)
+            return respond(method, url, headers)
 
     return lambda: _Client()
 
 
-def _run_to_completion(manager: DownloadManager, url: str, filename: str):
-    """start() calls asyncio.create_task, so it needs a running loop — same
-    requirement production has (called from an async admin route)."""
-
-    async def _go():
-        job = manager.start(url, filename)
-        return await manager.wait(job.job_id)
-
-    return asyncio.run(_go())
-
-
-def test_fresh_download_writes_full_content(tmp_path):
-    body = b"0123456789" * 10
-    calls = []
-
-    def respond(headers):
-        calls.append(headers)
-        return _FakeResponse(200, {"content-length": str(len(body))}, body)
-
-    completed = []
-    manager = DownloadManager(
-        tmp_path, http_client_factory=_factory(respond), on_complete=lambda: completed.append(True)
+def _manager(tmp_path, respond, **kwargs):
+    return DownloadManager(
+        tmp_path,
+        http_client_factory=_factory(respond),
+        validate_fn=kwargs.pop("validate_fn", lambda _path: None),
+        min_free_bytes=kwargs.pop("min_free_bytes", 0),
+        **kwargs,
     )
 
-    result = _run_to_completion(manager, "http://example/foo.zim", "foo.zim")
+
+def _run(manager: DownloadManager, *, url=GOOD_URL, filename="foo.zim", size=4):
+    async def go():
+        job = manager.start(url, filename, expected_bytes=size)
+        return await manager.wait(job.job_id)
+
+    return asyncio.run(go())
+
+
+def test_fresh_download_validates_and_installs_atomically(tmp_path):
+    body = b"zim!"
+    validated = []
+    manager = _manager(
+        tmp_path,
+        lambda _method, _url, _headers: _FakeResponse(
+            200, {"content-length": str(len(body))}, body
+        ),
+        validate_fn=lambda path: validated.append(path.read_bytes()),
+    )
+
+    result = _run(manager, size=len(body))
 
     assert result.status == "done"
-    assert result.downloaded_bytes == len(body)
-    assert result.total_bytes == len(body)
     assert (tmp_path / "foo.zim").read_bytes() == body
-    assert not (tmp_path / "foo.zim.part").exists()
-    assert completed == [True]
-    assert "Range" not in calls[0]
+    assert validated == [body]
+    assert not result.staging_path.exists()
 
 
-def test_start_rejects_path_traversal_filename(tmp_path):
-    manager = DownloadManager(tmp_path, http_client_factory=_factory(lambda headers: None))
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://download.kiwix.org/foo.zim",
+        "https://example.org/foo.zim",
+        "https://127.0.0.1/foo.zim",
+        "https://user:password@download.kiwix.org/foo.zim",
+        "https://download.kiwix.org:444/foo.zim",
+        "https://download.kiwix.org/foo.zim#fragment",
+    ],
+)
+def test_url_allowlist_rejects_ssrf_targets(url):
+    with pytest.raises(ValueError):
+        validate_download_url(url)
+
+
+def test_subdomain_of_official_download_host_is_allowed():
+    assert validate_download_url("https://mirror.download.kiwix.org/foo.zim")
+
+
+def test_start_rejects_unsafe_filename(tmp_path):
+    manager = _manager(tmp_path, lambda *_args: None)
 
     with pytest.raises(ValueError):
-        manager.start("http://example/foo.zim", "../state.db")
-
-    assert manager.list_jobs() == []
-    assert not (tmp_path.parent / "state.db").exists()
-
-
-def test_start_rejects_non_zim_filename(tmp_path):
-    manager = DownloadManager(tmp_path, http_client_factory=_factory(lambda headers: None))
-
+        manager.start(GOOD_URL, "../state.db", expected_bytes=4)
     with pytest.raises(ValueError):
-        manager.start("http://example/foo.txt", "foo.txt")
+        manager.start(GOOD_URL, "foo.txt", expected_bytes=4)
 
     assert manager.list_jobs() == []
 
 
-def test_resume_continues_from_partial_file(tmp_path):
-    first_half = b"AAAA"
-    second_half = b"BBBB"
-    full = first_half + second_half
-    (tmp_path / "foo.zim.part").write_bytes(first_half)
+def test_hostile_redirect_is_rejected(tmp_path):
+    manager = _manager(
+        tmp_path,
+        lambda _method, _url, _headers: _FakeResponse(
+            302, {"location": "http://127.0.0.1/secrets"}
+        ),
+    )
 
-    seen_headers = []
-
-    def respond(headers):
-        seen_headers.append(headers)
-        return _FakeResponse(206, {"content-length": str(len(second_half))}, second_half)
-
-    manager = DownloadManager(tmp_path, http_client_factory=_factory(respond))
-    result = _run_to_completion(manager, "http://example/foo.zim", "foo.zim")
-
-    assert result.status == "done"
-    assert (tmp_path / "foo.zim").read_bytes() == full
-    assert result.downloaded_bytes == len(full)
-    assert result.total_bytes == len(full)
-    assert seen_headers[0]["Range"] == f"bytes={len(first_half)}-"
-
-
-def test_download_error_sets_status_and_message(tmp_path):
-    def respond(headers):
-        return _FakeResponse(500, {}, b"")
-
-    manager = DownloadManager(tmp_path, http_client_factory=_factory(respond))
-    result = _run_to_completion(manager, "http://example/bad.zim", "bad.zim")
+    result = _run(manager)
 
     assert result.status == "error"
-    assert "HTTPStatusError" in result.error
+    assert "HTTPS" in result.error or "allowed" in result.error
+    assert "127.0.0.1" not in result.error
+
+
+@pytest.mark.parametrize("headers", [{}, {"content-length": "unknown"}])
+def test_unknown_response_size_is_rejected(tmp_path, headers):
+    manager = _manager(tmp_path, lambda *_args: _FakeResponse(200, headers, b"zim!"))
+    assert _run(manager).status == "error"
+
+
+def test_catalog_and_response_size_must_match(tmp_path):
+    manager = _manager(
+        tmp_path, lambda *_args: _FakeResponse(200, {"content-length": "5"}, b"zim!!")
+    )
+    result = _run(manager, size=4)
+    assert result.status == "error"
+    assert "does not match" in result.error
+
+
+def test_corrupt_zim_is_not_installed(tmp_path):
+    def corrupt(_path):
+        raise ValueError("downloaded artifact is not a valid ZIM")
+
+    manager = _manager(
+        tmp_path,
+        lambda *_args: _FakeResponse(200, {"content-length": "4"}, b"nope"),
+        validate_fn=corrupt,
+    )
+    result = _run(manager)
+    assert result.status == "error"
+    assert not (tmp_path / "foo.zim").exists()
+    assert not result.staging_path.exists()
+
+
+def test_existing_destination_is_never_replaced(tmp_path):
+    (tmp_path / "foo.zim").write_bytes(b"existing")
+    manager = _manager(tmp_path, lambda *_args: None)
+    with pytest.raises(ValueError, match="already exists"):
+        manager.start(GOOD_URL, "foo.zim", expected_bytes=4)
+    assert (tmp_path / "foo.zim").read_bytes() == b"existing"
+
+
+def test_insufficient_disk_space_is_rejected(tmp_path):
+    usage = namedtuple("usage", "total used free")(100, 99, 1)
+    manager = _manager(tmp_path, lambda *_args: None, disk_usage_fn=lambda _path: usage)
+    with pytest.raises(ValueError, match="disk space"):
+        manager.start(GOOD_URL, "foo.zim", expected_bytes=4)
+
+
+def test_http_errors_are_sanitized(tmp_path):
+    manager = _manager(tmp_path, lambda *_args: _FakeResponse(500, {}))
+    result = _run(manager)
+    assert result.status == "error"
+    assert result.error == "download server was unreachable or returned an error"
+    assert "sensitive" not in result.error
 
 
 def test_delete_zim_removes_file_and_notifies(tmp_path):
@@ -151,24 +199,16 @@ def test_delete_zim_removes_file_and_notifies(tmp_path):
     assert completed == [True]
 
 
-def test_delete_zim_rejects_path_traversal_filename(tmp_path):
+def test_delete_zim_rejects_unsafe_filename(tmp_path):
     outside = tmp_path.parent / "settings.db"
     outside.write_bytes(b"data")
 
     with pytest.raises(ValueError):
         delete_zim(tmp_path, "../settings.db")
-
-    assert outside.exists()
-
-
-def test_delete_zim_rejects_non_zim_filename(tmp_path):
-    target = tmp_path / "settings.db"
-    target.write_bytes(b"data")
-
     with pytest.raises(ValueError):
         delete_zim(tmp_path, "settings.db")
 
-    assert target.exists()
+    assert outside.exists()
 
 
 def test_delete_zim_missing_file_returns_false(tmp_path):
