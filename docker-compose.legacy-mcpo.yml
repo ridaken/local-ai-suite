@@ -1,0 +1,19 @@
+services:
+  mcpo:
+    image: ghcr.io/open-webui/mcpo:main
+    profiles: [legacy-mcpo]
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/start_mcpo.sh"]
+    volumes:
+      - "./scripts/start_mcpo.sh:/start_mcpo.sh:ro"
+    secrets:
+      - mcp_api_key
+      - mcpo_api_key
+    networks: [las-clients]
+
+secrets:
+  mcpo_api_key:
+    file: ./config/secrets/mcpo_api_key.txt

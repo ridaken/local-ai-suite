@@ -1,132 +1,181 @@
-# Infrastructure: kiwix-serve (offline docs) + qdrant (vector DB, Phase 2) +
-# gateway (Phase 3 management plane: MCP-over-HTTP + admin UI). SearXNG is
-# added in a later phase (see docs/DESIGN.md).
-#
-# Data is bind-mounted from your data drive (see config/.env), so nothing large
-# is stored inside the repo. Start with:
-#   docker compose --env-file config/.env up -d
-#
-# config/.env is optional — `docker compose up -d --build` works with zero
-# configuration (ZIM_DIR falls back to ./data/zim next to the repo; the
-# gateway's env_file is not required to exist). The admin UI at :8090 flags
-# anything that still needs setting. Point ZIM_DIR at a real data drive
-# whenever you're ready — see README.md.
 services:
-  # kiwix's --library mode requires library.xml to exist before it will even
-  # start. Seed an empty one (a placeholder, not a real listing — the gateway
-  # overwrites it with real book entries on its own startup and on every
-  # add/delete) so kiwix works standalone without ever needing the gateway
-  # image built — this keeps Phase 1 (kiwix-only) dependency-free.
+  config-validator:
+    build: .
+    command: ["python", "-m", "mcp_gateway.validate_config"]
+    environment:
+      ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      MCP_API_KEY_FILE: /run/secrets/mcp_api_key
+    secrets:
+      - admin_token
+      - mcp_api_key
+    restart: "no"
+
+  state-init:
+    build: .
+    command: ["python", "-m", "mcp_gateway.state_init"]
+    depends_on:
+      config-validator:
+        condition: service_completed_successfully
+    environment:
+      ZIM_DIR: /corpus
+      STATE_DIR: /state
+      SETTINGS_DB: /state/settings.db
+    volumes:
+      - "${ZIM_DIR:-./data/zim}:/corpus:ro"
+      - "${STATE_DIR:-./data/state}:/state"
+    restart: "no"
+
   library-init:
-    image: busybox:latest
-    container_name: las-library-init
+    image: busybox:1.37
     command:
       - sh
       - -c
-      - "test -f /data/library.xml || printf '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n<library version=\"20110515\"></library>\\n' > /data/library.xml"
+      - "test -f /data/library.xml || printf '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<library version=\"20110515\"></library>\n' > /data/library.xml"
     volumes:
       - "${ZIM_DIR:-./data/zim}:/data"
+    networks: [las-backend]
     restart: "no"
 
   kiwix:
     image: ghcr.io/kiwix/kiwix-serve:latest
-    container_name: las-kiwix
     restart: unless-stopped
     depends_on:
       library-init:
         condition: service_completed_successfully
     ports:
-      - "8080:8080"
-    # Library mode: serves whatever library.xml lists (the gateway writes this
-    # as ZIMs are added/removed) and hot-reloads on change — no restart needed.
-    # The image's start.sh already injects `--port=8080` (override via the PORT
-    # env var, not a flag) and appends this command, so passing --port here
-    # would duplicate it and kiwix-serve's strict parser rejects the whole line.
+      - "127.0.0.1:${KIWIX_PORT:-8080}:8080"
     command: ["--library", "--monitorLibrary", "/data/library.xml"]
     volumes:
       - "${ZIM_DIR:-./data/zim}:/data:ro"
     working_dir: /data
+    networks:
+      - las-backend
+      - las-host
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: las-qdrant
     restart: unless-stopped
     ports:
-      - "6333:6333"  # REST/gRPC API
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
     volumes:
-      # Vector storage — small (curated corpora only); keep on SSD (see DESIGN.md).
       - "${QDRANT_STORAGE:-./data/qdrant}:/qdrant/storage"
+    networks:
+      - las-backend
+      - las-host
 
   gateway:
     build: .
-    container_name: las-gateway
     restart: unless-stopped
     depends_on:
-      - kiwix
-      - qdrant
-    # Admin UI + MCP-over-HTTP. Loopback-only on the host by default — this is
-    # an unauthenticated surface, so think before widening this to 0.0.0.0.
+      state-init:
+        condition: service_completed_successfully
+      kiwix:
+        condition: service_started
+      qdrant:
+        condition: service_started
     ports:
-      - "127.0.0.1:${ADMIN_PORT:-8090}:8090"
-    # Optional — the gateway has sane fallback defaults for everything here
-    # and the admin UI (http://localhost:8090) surfaces what's still worth
-    # setting, so a missing config/.env does not block startup.
+      - "127.0.0.1:${MCP_PORT:-8090}:8090"
     env_file:
       - path: config/.env
         required: false
     environment:
-      # Container-internal endpoints override config/.env's host-oriented
-      # defaults (those are for running the gateway directly on the host, e.g.
-      # pi's stdio launch). host.docker.internal resolves out of the box on
-      # Docker Desktop (Windows/Mac) — this targets the co-located Windows
-      # inference PC deployment (see docs/DESIGN.md).
+      LAS_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8090"
+      MCP_API_KEY_FILE: /run/secrets/mcp_api_key
+      KAGI_API_KEY_FILE: /run/secrets/kagi_api_key
+      NCBI_API_KEY_FILE: /run/secrets/ncbi_api_key
+      MCP_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,[::1]:*,las-gateway:*,gateway:*"
       KIWIX_URL: http://kiwix:8080
-      # Citation links shown to the user/model must be browser-reachable, not the
-      # internal service name. kiwix publishes 8080 on the host, so localhost
-      # works; override KIWIX_PUBLIC_URL in config/.env if you expose it elsewhere.
       KIWIX_PUBLIC_URL: ${KIWIX_PUBLIC_URL:-http://localhost:8080}
       QDRANT_URL: http://qdrant:6333
       EMBED_URL: http://host.docker.internal:8081/v1/embeddings
       RERANK_URL: http://host.docker.internal:8082/v1/rerank
-      ZIM_DIR: /data
-      KIWIX_DATA_DIR: /data
-      ADMIN_HOST: 0.0.0.0
-      ADMIN_PORT: "8090"
-      # Persist under the same bind mount as the ZIMs rather than the
-      # container's ephemeral filesystem.
-      STATE_DB: /data/state.db
-      SETTINGS_DB: /data/settings.db
+      ZIM_DIR: /corpus
+      LIBRARY_XML_PATH: /corpus/library.xml
+      STATE_DIR: /state
+      SETTINGS_DB: /state/settings.db
+    secrets:
+      - mcp_api_key
+      - kagi_api_key
+      - ncbi_api_key
     volumes:
-      # Read-write: the admin UI downloads/deletes ZIMs and writes library.xml here.
-      - "${ZIM_DIR:-./data/zim}:/data"
+      - "${ZIM_DIR:-./data/zim}:/corpus:ro"
+      - "${STATE_DIR:-./data/state}:/state:ro"
+    networks:
+      las-backend: {}
+      las-clients:
+        aliases: [las-gateway]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
-  # mcpo bridges the gateway's MCP-over-HTTP endpoint into a plain OpenAPI tool
-  # server, which is how OpenWebUI consumes tools. It connects to the *running*
-  # gateway (one source of truth — it honors the admin UI's per-book toggles)
-  # rather than spawning a second stdio gateway. pi talks to /mcp directly and
-  # does not need this.
-  #
-  # Published on the host so an OpenWebUI container on Docker's default bridge
-  # network can reach it at http://host.docker.internal:${MCPO_PORT}. That makes
-  # this an unauthenticated-by-default surface on your LAN, so it is protected by
-  # MCPO_API_KEY — set one in config/.env. In OpenWebUI, register
-  # http://host.docker.internal:8000 as an OpenAPI tool server with that key.
-  mcpo:
-    image: ghcr.io/open-webui/mcpo:main
-    container_name: las-mcpo
+  admin:
+    build: .
+    command: ["python", "-m", "mcp_gateway.admin_server"]
     restart: unless-stopped
     depends_on:
-      - gateway
+      state-init:
+        condition: service_completed_successfully
+      library-init:
+        condition: service_completed_successfully
     ports:
-      - "${MCPO_PORT:-8000}:8000"
-    command:
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "8000"
-      - "--api-key"
-      - "${MCPO_API_KEY:-change-me}"
-      - "--server-type"
-      - "streamablehttp"
-      - "--"
-      - "http://gateway:8090/mcp"
+      - "127.0.0.1:${ADMIN_PORT:-8091}:8091"
+    env_file:
+      - path: config/.env
+        required: false
+    environment:
+      ADMIN_HOST: 0.0.0.0
+      ADMIN_PORT: "8091"
+      ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      KAGI_API_KEY_FILE: /run/secrets/kagi_api_key
+      NCBI_API_KEY_FILE: /run/secrets/ncbi_api_key
+      ADMIN_ALLOWED_HOSTS: "localhost,127.0.0.1,[::1],las-admin"
+      ADMIN_ALLOWED_ORIGINS: "http://localhost:${ADMIN_PORT:-8091},http://127.0.0.1:${ADMIN_PORT:-8091}"
+      KIWIX_URL: http://kiwix:8080
+      QDRANT_URL: http://qdrant:6333
+      EMBED_URL: http://host.docker.internal:8081/v1/embeddings
+      RERANK_URL: http://host.docker.internal:8082/v1/rerank
+      ZIM_DIR: /corpus
+      KIWIX_DATA_DIR: /data
+      LIBRARY_XML_PATH: /corpus/library.xml
+      STATE_DIR: /state
+      SETTINGS_DB: /state/settings.db
+    secrets:
+      - admin_token
+      - kagi_api_key
+      - ncbi_api_key
+    volumes:
+      - "${ZIM_DIR:-./data/zim}:/corpus"
+      - "${STATE_DIR:-./data/state}:/state"
+    networks:
+      - las-backend
+      - las-egress
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  las-backend:
+    name: las-backend
+    internal: true
+  las-clients:
+    name: las-clients
+  las-egress:
+    name: las-egress
+  las-host:
+    name: las-host
+
+secrets:
+  admin_token:
+    file: ./config/secrets/admin_token.txt
+  mcp_api_key:
+    file: ./config/secrets/mcp_api_key.txt
+  kagi_api_key:
+    file: ./config/secrets/kagi_api_key.txt
+  ncbi_api_key:
+    file: ./config/secrets/ncbi_api_key.txt
