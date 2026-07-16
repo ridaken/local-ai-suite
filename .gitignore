@@ -1,5 +1,7 @@
 # Local config with secrets / machine-specific paths
 config/.env
+config/secrets/*
+!config/secrets/*.example
 
 # Python
 __pycache__/
