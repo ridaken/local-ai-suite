@@ -94,18 +94,23 @@ def _fake_fetch(html: str, status_code: int = 200):
 
 def test_kb_read_pages_through_an_article(monkeypatch):
     _set_kiwix(monkeypatch)
-    monkeypatch.setattr("mcp_gateway.config.KB_READ_WINDOW_CHARS", 50)
-    monkeypatch.setattr(kb_read_mod, "_fetch_html", _fake_fetch(_HTML))
+    monkeypatch.setattr("mcp_gateway.config.KB_READ_WINDOW_CHARS", 500)
+    long_html = (
+        "<html><head><title>Hypothyroidism</title></head><body><p>"
+        + "x" * 700
+        + "</p></body></html>"
+    )
+    monkeypatch.setattr(kb_read_mod, "_fetch_html", _fake_fetch(long_html))
     source = "http://kiwix:8080/viewer#wikipedia_en/A/Hypothyroidism"
 
     first = asyncio.run(kb_read(source))
     assert '"Hypothyroidism"' in first
-    assert "characters 0-50 of" in first
-    assert "call kb_read with offset=50 to continue" in first
+    assert "characters 0-500 of" in first
+    assert "call kb_read with offset=500 to continue" in first
     assert f"source: {source}" in first
 
-    second = asyncio.run(kb_read(source, offset=50))
-    assert "characters 50-" in second
+    second = asyncio.run(kb_read(source, offset=500))
+    assert "characters 500-" in second
 
 
 def test_kb_read_final_page_says_end_of_article(monkeypatch):
@@ -125,6 +130,21 @@ def test_kb_read_offset_past_end(monkeypatch):
         kb_read("http://kiwix:8080/content/wikipedia_en/A/X", offset=10_000_000)
     )
     assert "past the end" in result
+
+
+def test_kb_read_rejects_negative_and_excessive_public_offsets(monkeypatch):
+    _set_kiwix(monkeypatch)
+
+    async def must_not_fetch(url: str) -> httpx.Response:
+        raise AssertionError("invalid offsets must be rejected before fetch")
+
+    monkeypatch.setattr(kb_read_mod, "_fetch_html", must_not_fetch)
+    source = "http://kiwix:8080/content/wikipedia_en/A/X"
+
+    assert "invalid_offset" in asyncio.run(kb_read(source, offset=-1))
+    assert "invalid_offset" in asyncio.run(
+        kb_read(source, offset=kb_read_mod.config.ARTICLE_MAX_OFFSET + 1)
+    )
 
 
 def test_kb_read_refuses_foreign_host_without_fetching(monkeypatch):

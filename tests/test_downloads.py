@@ -6,7 +6,13 @@ from collections import namedtuple
 import httpx
 import pytest
 
-from mcp_gateway.downloads import DownloadManager, delete_zim, validate_download_url
+from mcp_gateway.downloads import (
+    DownloadJob,
+    DownloadJobStore,
+    DownloadManager,
+    delete_zim,
+    validate_download_url,
+)
 
 GOOD_URL = "https://download.kiwix.org/foo.zim"
 
@@ -213,3 +219,221 @@ def test_delete_zim_rejects_unsafe_filename(tmp_path):
 
 def test_delete_zim_missing_file_returns_false(tmp_path):
     assert delete_zim(tmp_path, "missing.zim") is False
+
+
+def _stored_partial(tmp_path, *, status="paused", body=b"zi", expected=4):
+    state_db = tmp_path / "state.db"
+    staging = tmp_path / ".staging" / "foo.zim.job1.part"
+    staging.parent.mkdir(parents=True)
+    staging.write_bytes(body)
+    job = DownloadJob(
+        job_id="job1",
+        url=GOOD_URL,
+        filename="foo.zim",
+        dest_path=tmp_path / "foo.zim",
+        staging_path=staging,
+        expected_bytes=expected,
+        downloaded_bytes=len(body),
+        etag='"v1"',
+        status=status,
+        created_at=1,
+        updated_at=1,
+    )
+    DownloadJobStore(state_db).create(job)
+    return state_db, job
+
+
+def test_restart_recovers_interrupted_job_as_paused(tmp_path):
+    state_db, _job = _stored_partial(tmp_path, status="downloading")
+
+    manager = _manager(tmp_path, lambda *_args: None, state_db=state_db)
+    recovered = manager.get_job("job1")
+
+    assert recovered.status == "paused"
+    assert recovered.downloaded_bytes == 2
+    assert recovered.etag == '"v1"'
+
+
+def test_resume_requires_matching_content_range_and_installs(tmp_path):
+    state_db, _job = _stored_partial(tmp_path)
+    seen_headers = []
+
+    def respond(_method, _url, headers):
+        seen_headers.append(headers)
+        return _FakeResponse(
+            206,
+            {
+                "content-length": "2",
+                "content-range": "bytes 2-3/4",
+                "etag": '"v1"',
+            },
+            b"m!",
+        )
+
+    manager = _manager(tmp_path, respond, state_db=state_db)
+
+    async def go():
+        manager.resume("job1")
+        return await manager.wait("job1")
+
+    result = asyncio.run(go())
+
+    assert result.status == "done"
+    assert (tmp_path / "foo.zim").read_bytes() == b"zim!"
+    assert seen_headers[0]["Range"] == "bytes=2-"
+    assert seen_headers[0]["If-Range"] == '"v1"'
+
+
+def test_resume_rejects_mismatched_range_without_corrupting_partial(tmp_path):
+    state_db, job = _stored_partial(tmp_path)
+    manager = _manager(
+        tmp_path,
+        lambda *_args: _FakeResponse(
+            206,
+            {"content-length": "2", "content-range": "bytes 1-2/4"},
+            b"xx",
+        ),
+        state_db=state_db,
+    )
+
+    async def go():
+        manager.resume("job1")
+        return await manager.wait("job1")
+
+    result = asyncio.run(go())
+
+    assert result.status == "error"
+    assert "range" in result.error.lower()
+    assert job.staging_path.read_bytes() == b"zi"
+
+
+def test_retry_discards_partial_and_restarts_from_zero(tmp_path):
+    state_db, _job = _stored_partial(tmp_path, status="error")
+    seen_headers = []
+
+    def respond(_method, _url, headers):
+        seen_headers.append(headers)
+        return _FakeResponse(200, {"content-length": "4"}, b"zim!")
+
+    manager = _manager(tmp_path, respond, state_db=state_db)
+
+    async def go():
+        manager.retry("job1")
+        return await manager.wait("job1")
+
+    result = asyncio.run(go())
+
+    assert result.status == "done"
+    assert "Range" not in seen_headers[0]
+    assert (tmp_path / "foo.zim").read_bytes() == b"zim!"
+
+
+def test_graceful_shutdown_persists_active_job_as_paused(tmp_path):
+    started = asyncio.Event()
+    never = asyncio.Event()
+
+    class SlowResponse(_FakeResponse):
+        async def aiter_bytes(self, chunk_size=None):  # noqa: ARG002
+            yield b"zi"
+            started.set()
+            await never.wait()
+
+    manager = _manager(
+        tmp_path,
+        lambda *_args: SlowResponse(200, {"content-length": "4"}),
+    )
+
+    async def go():
+        job = manager.start(GOOD_URL, "foo.zim", expected_bytes=4)
+        await started.wait()
+        await manager.shutdown()
+        return manager.get_job(job.job_id)
+
+    result = asyncio.run(go())
+
+    assert result.status == "paused"
+    assert result.downloaded_bytes == 2
+    assert result.staging_path.read_bytes() == b"zi"
+
+
+def test_remove_deletes_terminal_record_and_partial(tmp_path):
+    state_db, job = _stored_partial(tmp_path, status="cancelled")
+    manager = _manager(tmp_path, lambda *_args: None, state_db=state_db)
+
+    manager.remove("job1")
+
+    assert manager.get_job("job1") is None
+    assert not job.staging_path.exists()
+
+
+def test_duplicate_active_destination_is_rejected(tmp_path):
+    never = asyncio.Event()
+
+    class SlowResponse(_FakeResponse):
+        async def aiter_bytes(self, chunk_size=None):  # noqa: ARG002
+            await never.wait()
+            yield b"zim!"
+
+    manager = _manager(
+        tmp_path,
+        lambda *_args: SlowResponse(200, {"content-length": "4"}),
+        max_concurrency=2,
+    )
+
+    async def go():
+        manager.start(GOOD_URL, "foo.zim", expected_bytes=4)
+        with pytest.raises(ValueError, match="filename"):
+            manager.start(GOOD_URL, "foo.zim", expected_bytes=4)
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_user_cancel_keeps_partial_resumable(tmp_path):
+    started = asyncio.Event()
+    never = asyncio.Event()
+
+    class SlowResponse(_FakeResponse):
+        async def aiter_bytes(self, chunk_size=None):  # noqa: ARG002
+            yield b"zi"
+            started.set()
+            await never.wait()
+
+    manager = _manager(
+        tmp_path,
+        lambda *_args: SlowResponse(200, {"content-length": "4"}),
+    )
+
+    async def go():
+        job = manager.start(GOOD_URL, "foo.zim", expected_bytes=4)
+        await started.wait()
+        manager.cancel(job.job_id)
+        return await manager.wait(job.job_id)
+
+    result = asyncio.run(go())
+
+    assert result.status == "cancelled"
+    assert result.staging_path.read_bytes() == b"zi"
+
+
+def test_completed_history_is_pruned_to_retention_count(tmp_path):
+    state_db = tmp_path / "state.db"
+    store = DownloadJobStore(state_db)
+    for number in range(3):
+        store.create(
+            DownloadJob(
+                job_id=f"job{number}",
+                url=GOOD_URL,
+                filename=f"foo{number}.zim",
+                dest_path=tmp_path / f"foo{number}.zim",
+                staging_path=tmp_path / f"foo{number}.part",
+                expected_bytes=4,
+                status="done",
+                created_at=number,
+                updated_at=number,
+            )
+        )
+
+    manager = _manager(tmp_path, lambda *_args: None, state_db=state_db, retention=2)
+
+    assert [job.job_id for job in manager.list_jobs()] == ["job2", "job1"]

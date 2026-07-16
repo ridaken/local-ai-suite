@@ -152,7 +152,17 @@ def test_admin_rejects_hostile_host_and_origin(tmp_path):
 
 @pytest.mark.parametrize(
     "path",
-    ["/logout", "/sources/toggle", "/sources/delete", "/sources/download", "/settings/update"],
+    [
+        "/logout",
+        "/sources/toggle",
+        "/sources/delete",
+        "/sources/download",
+        "/downloads/resume",
+        "/downloads/cancel",
+        "/downloads/retry",
+        "/downloads/remove",
+        "/settings/update",
+    ],
 )
 def test_every_admin_mutation_requires_authentication_and_csrf(tmp_path, path):
     client, app = _admin_client(tmp_path)
