@@ -1,289 +1,186 @@
 # local-ai-suite
 
-local-ai-suite gives your local LLM a practical set of research tools: an
-offline knowledge base, live scholarly and web search, and exact calculation,
-all exposed through one MCP gateway.
+local-ai-suite is a local-first MCP server for offline Kiwix search, hybrid
+Qdrant retrieval, web and research tools, and basic utility tools. Version 0.2
+splits the MCP data plane from the administrator control plane and fails closed
+when hosted credentials or state are missing.
 
-It is designed for a Windows or Docker Desktop workstation running local AI
-clients such as pi, OpenWebUI, or any MCP-capable harness. Start the stack, open
-the admin page, download the reference libraries you want, and point your client
-at the gateway.
+## v0.2 security boundary
 
-## What You Get
+The default Compose stack runs two application services:
 
-- Offline knowledge search over Kiwix ZIM libraries, including Wikipedia,
-  Stack Overflow, DevDocs, and other catalog content.
-- Optional semantic search over your own repos, notes, and documents through
-  Qdrant plus a local embedding model.
-- A browser admin UI for checking service health, browsing and downloading ZIMs,
-  enabling or disabling sources, and choosing retrieval mode.
-- MCP tools for knowledge-base search, live web search, PubMed, arXiv, and safe
-  math.
-- Two ways to connect: stdio for desktop MCP clients, or HTTP at `/mcp` from the
-  containerized gateway.
+- `las-gateway` on `127.0.0.1:8090` exposes only `/mcp`, `/healthz`, and
+  `/readyz`. `/mcp` requires `Authorization: Bearer <MCP_API_KEY>`.
+- `las-admin` on `127.0.0.1:8091` exposes the management UI and download worker.
+  It requires `ADMIN_TOKEN`, an authenticated session, and CSRF protection.
 
-## Tools
+Kiwix (`127.0.0.1:8080`) and Qdrant (`127.0.0.1:6333`) are also loopback-only.
+The gateway reads corpus and state mounts read-only. Only the admin service can
+write corpus and state. Kiwix receives neither state nor secret mounts.
 
-| Tool | Use it for | Works offline? |
-| --- | --- | --- |
-| `kb_search` | Local reference answers from installed ZIMs and, if enabled, your indexed files | Yes |
-| `kb_read` | Full article text behind a `kb_search` result, a few thousand characters per page | Yes |
-| `calculate` | Exact arithmetic and common math functions | Yes |
-| `web_search` | Current web results through Kagi | No, needs `KAGI_API_KEY` |
-| `pubmed_search` | Biomedical literature citations from PubMed | No |
-| `arxiv_search` | Preprint search from arXiv | No |
+`python -m mcp_gateway.server` remains a credential-free stdio MCP server. The
+credentials below are mandatory only for hosted HTTP services.
 
-## Quick Start
+## Fresh installation
 
-### 1. Start The Stack
+Requirements: Docker with Compose, PowerShell 5.1 or newer for the setup helper,
+and enough disk space for the ZIM corpus you intend to install.
 
-You need Docker Desktop. From the repo root:
-
-```powershell
-docker compose up -d --build
-```
-
-Then open:
-
-- Admin UI: <http://localhost:8090>
-- Kiwix library: <http://localhost:8080>
-
-With no configuration file, the stack uses `./data/zim` in this repo for ZIM
-files and `./data/qdrant` for vectors. That is fine for a first run. For
-long-term use, point storage at a real data drive.
-
-### 2. Pick A Data Folder
-
-Copy the example config and edit the paths:
-
-```powershell
-Copy-Item config/.env.example config/.env
-```
-
-Set at least:
-
-```dotenv
-DATA_ROOT=D:/ai-data
-ZIM_DIR=D:/ai-data/zim
-QDRANT_STORAGE=D:/ai-data/qdrant
-STATE_DB=D:/ai-data/state.db
-SETTINGS_DB=D:/ai-data/settings.db
-```
-
-Restart after changing config:
-
-```powershell
-docker compose --env-file config/.env up -d --build
-```
-
-### 3. Add Offline Knowledge
-
-Open <http://localhost:8090> and use:
-
-- **Recommended** for starter downloads such as English Wikipedia, Stack
-  Overflow, Python docs, and web docs.
-- **Catalog** to search the public Kiwix catalog and download any ZIM into your
-  library.
-- **Sources** to see installed books, disable books from search, or delete them.
-- **Downloads** to track active downloads.
-- **Configuration** to set API keys, service URLs, default limits, model
-  endpoints, and storage-related paths.
-
-Kiwix hot-reloads the generated `library.xml`, so completed downloads become
-available without restarting the stack.
-
-### 4. Connect An AI Client
-
-For an MCP client that can talk to streamable HTTP, use:
-
-```text
-http://localhost:8090/mcp
-```
-
-For clients that launch an MCP server over stdio, install the Python
-dependencies and point the client at `mcp_gateway.server`:
-
-```powershell
-python -m venv .venv
-./.venv/Scripts/python.exe -m pip install -r requirements.txt
-```
-
-Example stdio server config:
-
-```json
-{
-  "mcpServers": {
-    "local-ai-suite": {
-      "command": "C:/Users/Tom/Documents/Repos/local-ai-suite/.venv/Scripts/python.exe",
-      "args": ["-m", "mcp_gateway.server"],
-      "cwd": "C:/Users/Tom/Documents/Repos/local-ai-suite"
-    }
-  }
-}
-```
-
-### OpenWebUI
-
-OpenWebUI consumes tools as an OpenAPI server, so it needs the `mcpo` bridge in
-front of the gateway. The stack ships an `mcpo` service that does this for you —
-it connects to the running gateway's `/mcp` endpoint (so it honors the admin
-UI's per-book toggles) and exposes every tool as an OpenAPI path.
-
-1. Set `MCPO_API_KEY` in `config/.env` to a long random string (the bridge is
-   published on the host, so this key is what keeps your LAN from calling the
-   tools). `docker compose up -d` starts `las-mcpo` on `MCPO_PORT` (default
-   `8000`).
-2. In OpenWebUI, go to **Settings → Tools → Add Connection** and add:
-   - URL: `http://host.docker.internal:8000` (OpenWebUI runs in a container, so
-     `localhost` there is not your host — use `host.docker.internal`; if
-     OpenWebUI runs directly on the host, `http://localhost:8000` is fine).
-   - API key: the `MCPO_API_KEY` value.
-3. OpenWebUI must have a **chat model that supports tool calling** configured
-   (e.g. your llama-server as an OpenAI-compatible connection). Tool calling is
-   driven by the model, so without one the tools will be registered but never
-   invoked.
-
-Ask a Wikipedia-answerable question and the model should call `kb_search` (then
-`kb_read` for detail) and answer with a citation.
-
-For the system prompt and settings that make the model actually *use* retrieval
-well (verify-and-cite behaviour, Native function calling, tool scoping), plus the
-OpenWebUI-vs-pi split, see [docs/prompts.md](docs/prompts.md).
-
-> To run the bridge without Docker instead, install mcpo and point it at the
-> gateway: `mcpo --port 8000 --server-type streamablehttp -- http://localhost:8090/mcp`.
-
-## Optional: Live Web Search
-
-`web_search` uses the Kagi Search API. Add your token to `config/.env`:
-
-```dotenv
-KAGI_API_KEY=your-token
-```
-
-If this is blank, the tool returns a clear "not configured" message and the
-other tools continue to work.
-
-## Optional: Semantic Search Over Your Files
-
-The local knowledge search can combine Kiwix full-text results with semantic
-matches from your own curated files.
-
-1. Run Qdrant through Docker Compose. It is included in the default stack.
-2. Serve an embedding model and reranker with OpenAI-compatible endpoints:
+1. Copy `config/.env.example` to `config/.env` and set `ZIM_DIR`, `STATE_DIR`,
+   and `QDRANT_STORAGE` to host paths you control. Keep them separate.
+2. Generate local service credentials and optional provider secret files:
 
    ```powershell
-   llama-server -m bge-m3.gguf --embedding --port 8081
-   llama-server -m bge-reranker-v2-m3.gguf --reranking --port 8082
+   .\scripts\init-secrets.ps1
    ```
 
-3. Edit `ingest/sources.yaml` to list the repos, notes, or document folders you
-   want indexed.
-4. Run the incremental ingest:
+   The helper writes ignored files under `config/secrets/`. Startup never
+   generates or prints credentials. Put a Kagi or NCBI API key into its matching
+   file if you use that provider; empty files leave those integrations disabled.
+3. Validate and start:
 
    ```powershell
-   ./.venv/Scripts/python.exe -m ingest.ingest
+   docker compose config
+   docker compose up -d --build
    ```
 
-In the admin UI, use **Settings** to choose:
+   `config-validator` checks credential length, placeholders, duplicates, and
+   unsafe MCP Host configuration before state initialization or either hosted
+   application starts.
+4. Open <http://localhost:8091>, paste the value from
+   `config/secrets/admin_token.txt`, and sign in. Do not expose the admin port
+   through a LAN bind or reverse proxy without also configuring HTTPS, trusted
+   Hosts/Origins, and `ADMIN_COOKIE_SECURE=1`.
 
-- **Hybrid**: Kiwix full-text plus vectors.
-- **Lexical only**: Kiwix full-text only.
-- **Vector only**: your indexed files only.
-- Reranking on or off.
+The admin configuration screen is deliberately read-only for infrastructure,
+endpoints, and secrets. Retrieval mode, reranking, and per-book toggles remain
+editable.
 
-If Qdrant, embeddings, or the reranker are unavailable, `kb_search` degrades to
-the tiers that are still reachable and reports partial-result warnings.
+## MCP clients
 
-## Running The Gateway Directly
+For a host client, use:
 
-The server defaults to stdio:
+- URL: `http://localhost:8090/mcp`
+- Header: `Authorization: Bearer <contents of mcp_api_key.txt>`
 
-```powershell
-./.venv/Scripts/python.exe -m mcp_gateway.server
-```
+For a client container attached to the named `las-clients` network, use the
+native MCP connection:
 
-To run the admin UI and HTTP MCP endpoint directly on the host instead of
-through Docker:
+- URL: `http://las-gateway:8090/mcp`
+- Header: `Authorization: Bearer <MCP_API_KEY>`
 
-```powershell
-$env:LAS_TRANSPORT="http"
-./.venv/Scripts/python.exe -m mcp_gateway.server
-```
+Native MCP is the documented OpenWebUI default. Attach the OpenWebUI container
+to `las-clients`, then configure the endpoint and bearer header above. Only the
+gateway and client integrations join this network; Qdrant, Kiwix, and admin stay
+on the backend side of the boundary.
 
-By default the admin service binds to `127.0.0.1:8090`. The admin UI has no
-authentication, so expose it beyond localhost only on a trusted network.
+### Optional legacy mcpo bridge
 
-## Configuration
-
-Settings can be changed from the admin UI's **Configuration** page. Saved
-values are stored in `SETTINGS_DB` and override environment/config-file values
-when the hosted gateway starts; most API keys, URLs, limits, and model endpoints
-also apply immediately when you save.
-
-The gateway still reads environment variables and, if present, `config/.env` as
-its initial defaults. Real environment variables win over the file before admin
-overrides are applied.
-
-Common settings:
-
-| Setting | Purpose |
-| --- | --- |
-| `ZIM_DIR` | Folder where ZIM files and `library.xml` live |
-| `KAGI_API_KEY` | Enables live web search |
-| `KIWIX_URL` | URL the gateway uses for Kiwix |
-| `QDRANT_URL`, `QDRANT_COLLECTION` | Vector database location and collection |
-| `EMBED_URL`, `EMBED_MODEL`, `EMBED_DIM` | Embedding endpoint |
-| `RERANK_URL`, `RERANK_MODEL` | Reranker endpoint |
-| `STATE_DB` | Incremental ingest manifest |
-| `SETTINGS_DB` | Runtime admin settings |
-| `ADMIN_HOST`, `ADMIN_PORT` | Admin UI and HTTP MCP bind address |
-
-Runtime choices made in the admin UI, such as retrieval mode, reranking, and
-per-book enablement, are also stored in `SETTINGS_DB` and take effect
-immediately.
-
-Some values describe the running process or Docker bind mounts. Changes to
-`ADMIN_HOST`, `ADMIN_PORT`, `SETTINGS_DB`, and compose-managed storage paths
-such as host-side `ZIM_DIR` or `QDRANT_STORAGE` are saved in the UI, but they
-need a gateway restart or Docker Compose recreation before the underlying bind
-or listener changes.
-
-## Smoke Test
-
-After installing Python dependencies:
+`mcpo` is no longer started by default and publishes no host port. To enable the
+legacy bridge on `las-clients`:
 
 ```powershell
-./.venv/Scripts/python.exe scripts/smoke_test.py
+docker compose -f docker-compose.yml -f docker-compose.legacy-mcpo.yml `
+  --profile legacy-mcpo up -d mcpo
 ```
 
-A healthy first setup should show Kiwix results once at least one searchable ZIM
-is installed. PubMed, arXiv, and calculate do not need local corpora. Web search
-needs `KAGI_API_KEY`.
+The bridge reads its client-facing `MCPO_API_KEY` and downstream `MCP_API_KEY`
+from Docker secret files. It never receives them as command-line values from the
+host or exposes port 8000 on the host.
 
-## For Maintainers
+## Migrating a v0.1 installation
 
-The project is intentionally split into small pieces:
+Version 0.1 stored runtime settings and provider secrets beside the ZIM corpus.
+Version 0.2 refuses hosted readiness while that legacy `settings.db` remains.
 
-- `mcp_gateway/` serves MCP tools, the admin UI, downloads, catalog search, and
-  runtime settings.
-- `retrieval/` merges Kiwix lexical search with optional Qdrant vector search
-  and reranking.
-- `ingest/` chunks and embeds curated local files into Qdrant.
-- `tests/` covers gateway behavior, admin flows, retrieval, ingest, downloads,
-  recommendations, and settings.
-
-Useful checks:
+Stop the old stack, configure the new `ZIM_DIR` and `STATE_DIR`, then preview the
+migration. The command is dry-run-only unless `--apply` is supplied:
 
 ```powershell
-./.venv/Scripts/python.exe -m ruff check .
-./.venv/Scripts/python.exe -m pytest
+.\scripts\migrate_v02.ps1
 ```
 
-`main` is protected by the local pre-push hook. Enable it once with:
+Review every reported path, then apply:
 
 ```powershell
-git config core.hooksPath .githooks
+.\scripts\migrate_v02.ps1 -Apply
 ```
 
-See `docs/DESIGN.md` for deeper architecture notes and future roadmap ideas.
+The migration:
+
+- copies the legacy database to `STATE_DIR/settings.db.v01.bak` first;
+- copies only retrieval behavior and book toggles into the new state database;
+- moves Kagi and NCBI values to non-overwriting secret files;
+- creates missing strong admin and MCP credentials without printing them; and
+- removes the corpus-side database only after backup and target verification.
+
+Existing secret files are never overwritten. If any apply step fails, the
+legacy database remains in place. Resolve the failure before retrying; a present
+backup intentionally prevents an ambiguous second migration.
+
+### Migration rollback
+
+1. Stop the v0.2 stack.
+2. Preserve the current `STATE_DIR/settings.db` for diagnosis.
+3. Copy `STATE_DIR/settings.db.v01.bak` back to `ZIM_DIR/settings.db`.
+4. Restore the v0.1 application revision and Compose definition.
+
+The v0.2 secret files can remain on disk during rollback. Do not copy or commit
+their values into `.env`, issue reports, or logs.
+
+## Download policy
+
+The admin UI accepts only server-issued, session-bound download actions. An
+action is HMAC-signed, expires after 15 minutes, and can be used once. The worker
+then enforces all of the following:
+
+- HTTPS on `download.kiwix.org` or its subdomains only;
+- no credentials, fragments, IP literals, nonstandard ports, or off-domain
+  redirects;
+- a known catalog size no larger than 200 GiB by default;
+- free space for the artifact plus the greater of 2 GiB or 5%;
+- one active download, a unique staging file, and no implicit replacement;
+- response size agreement with the catalog; and
+- successful `libzim` metadata access before atomic installation.
+
+Operational errors shown in the UI are sanitized and omit internal URLs and
+low-level exception details.
+
+## Development and verification
+
+Create a virtual environment, install runtime and development dependencies, and
+run:
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pip check
+docker compose config
+```
+
+The tests cover credential validation, MCP bearer authentication, admin sessions
+and CSRF, signed action tamper/replay/expiry, downloader SSRF and integrity
+checks, read-only state access, migration safety, and Compose trust boundaries.
+
+## Configuration reference
+
+Use `config/.env.example` for non-secret values and `config/secrets/*.example`
+for the secret-file names. A direct credential variable and its `_FILE` variant
+are mutually exclusive. Hosted credentials must contain at least 32 characters,
+must not be known placeholders, and must all differ.
+
+Important paths:
+
+- `ZIM_DIR`: corpus and generated `library.xml`;
+- `STATE_DIR`: runtime `settings.db` owned by the management plane;
+- `STATE_DB`: incremental ingest manifest;
+- `QDRANT_STORAGE`: vector database storage.
+
+## Known v0.2 limitations
+
+Phase 2 work remains for durable download job persistence/resume, broader
+container CPU and memory limits, image and dependency digest pinning, audit-log
+retention, multi-user administration, automated certificate management, and
+more extensive observability. The v0.2 safeguards intentionally cover the
+minimum required to close the Phase 1 security boundary without expanding into
+those operational features.
