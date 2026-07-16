@@ -13,6 +13,7 @@ from xml.etree import ElementTree as ET
 import httpx
 
 from mcp_gateway import config
+from mcp_gateway.limits import clamp_limit, response_bytes, validate_query
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
@@ -68,6 +69,8 @@ async def kiwix_search(query: str, limit: int, books: list[str] | None = None) -
     """
     if books == []:
         return []
+    query = validate_query(query)
+    limit = clamp_limit(limit, config.KB_SEARCH_LIMIT)
 
     params: dict[str, str | list[str]] = {
         "pattern": query,
@@ -87,7 +90,7 @@ async def kiwix_search(query: str, limit: int, books: list[str] | None = None) -
         )
     resp.raise_for_status()
 
-    root = ET.fromstring(resp.content)
+    root = ET.fromstring(response_bytes(resp))
     hits: list[Hit] = []
     for item in root.findall(".//item")[:limit]:
         hits.append(

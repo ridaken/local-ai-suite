@@ -20,6 +20,7 @@ from xml.etree import ElementTree as ET
 import httpx
 
 from . import config
+from .limits import clamp_limit, response_bytes, validate_query
 
 _NS = {"atom": "http://www.w3.org/2005/Atom"}
 _ACQUISITION_REL = "http://opds-spec.org/acquisition/open-access"
@@ -104,6 +105,11 @@ def parse_catalog_feed(xml_bytes: bytes) -> list[CatalogEntry]:
 
 async def search_catalog(query: str = "", lang: str = "", count: int = 30) -> list[CatalogEntry]:
     """Query the OPDS catalog. Raises httpx.HTTPError if unreachable."""
+    if query:
+        query = validate_query(query)
+    if len(lang) > 32:
+        raise ValueError("catalog language filter is too long")
+    count = clamp_limit(count, 20)
     params: dict[str, str] = {"count": str(count)}
     if query:
         params["q"] = query
@@ -117,4 +123,4 @@ async def search_catalog(query: str = "", lang: str = "", count: int = 30) -> li
             headers={"User-Agent": config.USER_AGENT},
         )
     resp.raise_for_status()
-    return parse_catalog_feed(resp.content)
+    return parse_catalog_feed(response_bytes(resp))

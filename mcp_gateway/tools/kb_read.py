@@ -19,6 +19,14 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from .. import config
+from ..limits import (
+    ToolInputError,
+    UpstreamResponseError,
+    error_text,
+    response_bytes,
+    validate_offset,
+    validate_source,
+)
 
 # Fallback window size when KB_READ_WINDOW_CHARS is set to a non-positive value.
 _DEFAULT_WINDOW = 4000
@@ -186,7 +194,11 @@ async def article_excerpt(source: str, query: str, size: int) -> str | None:
         return None
     if resp.status_code != 200:
         return None
-    _title, text = extract_text(resp.text)
+    try:
+        body = response_bytes(resp).decode(resp.encoding or "utf-8", errors="replace")
+    except UpstreamResponseError:
+        return None
+    _title, text = extract_text(body)
     return best_excerpt(text, query, size) or None
 
 
@@ -222,6 +234,11 @@ async def _fetch_article(url: str) -> httpx.Response:
 
 async def kb_read(source: str, offset: int = 0) -> str:
     """Read a knowledge-base article in full, one window at a time."""
+    try:
+        source = validate_source(source)
+        offset = validate_offset(offset)
+    except ToolInputError as exc:
+        return error_text("kb_read", exc)
     url = content_url(source)
     if url is None:
         return (
@@ -236,23 +253,28 @@ async def kb_read(source: str, offset: int = 0) -> str:
             "kb_read error: the knowledge base redirected outside its own host "
             f"({exc}) — refusing to follow."
         )
-    except httpx.HTTPError as exc:
-        return f"kb_read error: could not reach the knowledge base ({exc})."
+    except httpx.HTTPError:
+        return "kb_read error [upstream_unavailable]: knowledge-base request failed."
     if resp.status_code == 404:
         return (
             f"kb_read error: article not found at {source}. Use a source URL "
             "exactly as returned by kb_search."
         )
     if resp.status_code != 200:
-        return f"kb_read error: knowledge base returned HTTP {resp.status_code}."
+        return f"kb_read error [upstream_http]: knowledge base returned HTTP {resp.status_code}."
 
-    title, text = extract_text(resp.text)
+    try:
+        body = response_bytes(resp).decode(resp.encoding or "utf-8", errors="replace")
+    except UpstreamResponseError as exc:
+        return error_text("kb_read", exc)
+    title, text = extract_text(body)
     if not text:
         return f"kb_read: no readable text at {source}."
 
     # A non-positive window would page 0 chars and tell the model to retry at
     # the same offset forever; treat it as misconfiguration and use the default.
-    size = config.KB_READ_WINDOW_CHARS if config.KB_READ_WINDOW_CHARS > 0 else _DEFAULT_WINDOW
+    configured_size = config.KB_READ_WINDOW_CHARS
+    size = min(16000, max(500, configured_size if configured_size > 0 else _DEFAULT_WINDOW))
     body, start, end, total = window(text, offset, size)
     if start >= total:
         return (

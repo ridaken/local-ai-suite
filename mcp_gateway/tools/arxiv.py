@@ -12,6 +12,14 @@ from xml.etree import ElementTree as ET
 import httpx
 
 from .. import config
+from ..limits import (
+    ToolInputError,
+    UpstreamResponseError,
+    clamp_limit,
+    error_text,
+    response_bytes,
+    validate_query,
+)
 
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _WS_RE = re.compile(r"\s+")
@@ -26,6 +34,11 @@ def _clean(text: str | None) -> str:
 async def arxiv_search(query: str, limit: int = 5) -> str:
     """Search arXiv and return cited preprint summaries."""
     try:
+        query = validate_query(query)
+        limit = clamp_limit(limit, 5)
+    except ToolInputError as exc:
+        return error_text("arxiv_search", exc)
+    try:
         async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(
                 config.ARXIV_API_URL,
@@ -38,13 +51,15 @@ async def arxiv_search(query: str, limit: int = 5) -> str:
                 headers={"User-Agent": config.USER_AGENT},
             )
             resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        return f"arxiv_search error: could not reach arXiv ({type(exc).__name__}: {exc})."
+    except httpx.HTTPError:
+        return "arxiv_search error [upstream_unavailable]: arXiv request failed."
 
     try:
-        root = ET.fromstring(resp.content)
-    except ET.ParseError as exc:
-        return f"arxiv_search error: could not parse arXiv response ({exc})."
+        root = ET.fromstring(response_bytes(resp))
+    except UpstreamResponseError as exc:
+        return error_text("arxiv_search", exc)
+    except ET.ParseError:
+        return "arxiv_search error [upstream_malformed]: arXiv returned malformed XML."
 
     entries = root.findall(f"{_ATOM}entry")
     if not entries:

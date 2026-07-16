@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from mcp_gateway import config, zim_library
+from mcp_gateway.limits import clamp_limit, validate_query
 from mcp_gateway.settings_store import SettingsStore, default_store
 
 from .embed import embed_query
@@ -82,7 +83,8 @@ async def hybrid_search(
     client=None,
     settings: SettingsStore | None = None,
 ) -> HybridResult:
-    top_k = top_k or config.KB_SEARCH_LIMIT
+    query = validate_query(query)
+    top_k = clamp_limit(top_k, config.KB_SEARCH_LIMIT)
     settings = settings or default_store()
     mode = settings.get_retrieval_mode()  # "hybrid" | "lexical" | "vector"
     vector_enabled = config.vector_tier_enabled()

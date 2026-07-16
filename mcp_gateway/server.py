@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from . import config
+from .limits import tool_slot
 from .security import MCPBearerAuthMiddleware
 from .settings_store import SettingsStore, set_default_store
 from .tools.arxiv import arxiv_search as _arxiv_search
@@ -44,37 +45,43 @@ mcp = FastMCP("local-ai-suite", transport_security=_transport_security())
 @mcp.tool()
 async def kb_search(query: str, limit: int = 5) -> str:
     """Search the local offline knowledge base for stable facts and cited passages."""
-    return await _kb_search(query, limit)
+    async with tool_slot("kb_search", config.KB_SEARCH_CONCURRENCY):
+        return await _kb_search(query, limit)
 
 
 @mcp.tool()
 async def kb_read(source: str, offset: int = 0) -> str:
     """Read a knowledge-base article returned by kb_search in paginated windows."""
-    return await _kb_read(source, offset)
+    async with tool_slot("kb_read", config.KB_READ_CONCURRENCY):
+        return await _kb_read(source, offset)
 
 
 @mcp.tool()
 async def web_search(query: str, limit: int = 5) -> str:
     """Search the live web for current information and cited results."""
-    return await _web_search(query, limit)
+    async with tool_slot("web_search", config.WEB_SEARCH_CONCURRENCY):
+        return await _web_search(query, limit)
 
 
 @mcp.tool()
 async def pubmed_search(query: str, limit: int = 5) -> str:
     """Search PubMed for biomedical literature and cited article summaries."""
-    return await _pubmed_search(query, limit)
+    async with tool_slot("pubmed_search", config.PUBMED_SEARCH_CONCURRENCY):
+        return await _pubmed_search(query, limit)
 
 
 @mcp.tool()
 async def arxiv_search(query: str, limit: int = 5) -> str:
     """Search arXiv for technical and scientific preprints."""
-    return await _arxiv_search(query, limit)
+    async with tool_slot("arxiv_search", config.ARXIV_SEARCH_CONCURRENCY):
+        return await _arxiv_search(query, limit)
 
 
 @mcp.tool()
 async def calculate(expression: str) -> str:
     """Evaluate arithmetic and whitelisted common math functions."""
-    return await _calculate(expression)
+    async with tool_slot("calculate", config.CALCULATE_CONCURRENCY):
+        return await _calculate(expression)
 
 
 def build_app(*, api_key: str | None = None, settings: SettingsStore | None = None) -> Starlette:
