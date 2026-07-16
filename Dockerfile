@@ -1,6 +1,5 @@
-# Gateway service: MCP-over-HTTP (/mcp) + the admin UI (/), in one small
-# image. kiwix-serve and qdrant stay upstream images (see docker-compose.yml)
-# so their own upgrade cadence isn't tangled up with ours.
+# Shared image for the split MCP gateway and admin service. Compose selects the
+# entrypoint and grants each process only the mounts it needs.
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -13,6 +12,6 @@ COPY retrieval/ retrieval/
 COPY ingest/ ingest/
 
 ENV LAS_TRANSPORT=http
-EXPOSE 8090
+EXPOSE 8090 8091
 
 CMD ["python", "-m", "mcp_gateway.server"]
