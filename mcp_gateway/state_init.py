@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import config
+from .downloads import DownloadJobStore
 from .settings_store import SettingsStore
 
 
@@ -16,6 +17,7 @@ def initialize_state() -> None:
             f"legacy settings database remains at {legacy}; run the v0.2 migration before startup"
         )
     SettingsStore(target)
+    DownloadJobStore(target)
 
 
 def main() -> None:
