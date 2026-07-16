@@ -1,15 +1,22 @@
-"""Code-aware chunking.
+"""Structure-aware chunking.
 
-Naive fixed-size splitting mangles code, so Python files are chunked by symbol
-(function / method / class) using the AST, keeping each definition intact with its
-decorators and docstring. Everything else falls back to a line-aligned, overlapping
-window splitter. Every chunk carries path / language / symbol / line-range metadata
-so retrieval can cite and filter precisely.
+Naive fixed-size splitting mangles code and prose alike, so each language is cut
+on its own natural boundaries: Python by symbol (function / method / class) via
+the AST, keeping a definition intact with its decorators and docstring; Markdown
+by heading, keeping a section with the heading that introduces it. Everything
+else falls back to a line-aligned, overlapping window splitter. Every chunk
+carries path / language / symbol / line-range metadata so retrieval can cite and
+filter precisely.
+
+Structural chunking ignores size by design, so chunk_file applies a hard
+CHUNK_MAX_CHARS cap on the way out — the embedder truncates or rejects anything
+larger, and silently embedding half a chunk is worse than splitting it.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass, field
 
 from mcp_gateway import config
@@ -61,13 +68,77 @@ def language_for(path: str) -> str:
 
 
 def chunk_file(path: str, text: str) -> list[Chunk]:
-    """Chunk one file into symbol- or window-based chunks."""
+    """Chunk one file into symbol-, heading-, or window-based chunks.
+
+    Guarantees every returned chunk is within CHUNK_MAX_CHARS: the embedder
+    truncates or rejects anything larger, so a single 5k-line function or a
+    minified one-liner must not escape as one oversized chunk.
+    """
     language = language_for(path)
+    chunks: list[Chunk] | None = None
     if language == "python":
         chunks = _chunk_python(path, text)
-        if chunks is not None:
-            return chunks
-    return _chunk_generic(path, text, language)
+    elif language == "markdown":
+        chunks = _chunk_markdown(path, text)
+    if chunks is None:
+        chunks = _chunk_generic(path, text, language)
+    return _enforce_max_chars(chunks)
+
+
+def _enforce_max_chars(chunks: list[Chunk]) -> list[Chunk]:
+    out: list[Chunk] = []
+    for chunk in chunks:
+        out.extend(_split_oversized(chunk))
+    return out
+
+
+def _split_oversized(chunk: Chunk) -> list[Chunk]:
+    """Split one over-long chunk into line-aligned parts under the cap.
+
+    Symbol and heading chunking deliberately ignore size to keep a definition
+    intact, so this is the backstop. A single line longer than the cap (minified
+    JS, a giant data literal) has no line boundary to split on and is cut at
+    character boundaries — nothing else can bring it under.
+    """
+    max_chars = config.CHUNK_MAX_CHARS
+    if len(chunk.text) <= max_chars:
+        return [chunk]
+
+    out: list[Chunk] = []
+    buf: list[str] = []
+    buf_len = 0
+    start_line = chunk.start_line
+    line_no = chunk.start_line
+    part = 0
+
+    def flush(end_line: int) -> None:
+        nonlocal buf, buf_len, part
+        body = "\n".join(buf).strip("\n")
+        if body.strip():
+            part += 1
+            out.append(
+                Chunk(
+                    chunk.path,
+                    chunk.language,
+                    f"{chunk.symbol} (part {part})",
+                    start_line,
+                    max(start_line, end_line),
+                    body,
+                )
+            )
+        buf, buf_len = [], 0
+
+    for line in chunk.text.split("\n"):
+        segments = [line[i : i + max_chars] for i in range(0, len(line), max_chars)] or [""]
+        for segment in segments:
+            if buf and buf_len + len(segment) + 1 > max_chars:
+                flush(line_no)
+                start_line = line_no
+            buf.append(segment)
+            buf_len += len(segment) + 1
+        line_no += 1
+    flush(line_no - 1)
+    return out
 
 
 def _slice(lines: list[str], start: int, end: int) -> str:
@@ -136,6 +207,60 @@ def _chunk_class(path: str, lines: list[str], node: ast.ClassDef, text: str) -> 
     return chunks
 
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+_FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
+
+
+def _chunk_markdown(path: str, text: str) -> list[Chunk] | None:
+    """Chunk markdown at headings, keeping each section whole.
+
+    Window splitting cuts prose mid-section and strands a heading from the text
+    it introduces; a section is the natural retrieval unit. Fenced code is
+    tracked so a `#` comment inside a shell/python block is not mistaken for a
+    heading and used to split the fence in half.
+    """
+    lines = text.splitlines()
+    if not lines:
+        return []
+
+    sections: list[tuple[str, int, int]] = []  # (symbol, start_line, end_line)
+    fence: str | None = None
+    symbol = "<preamble>"
+    start = 1
+    found_heading = False
+
+    for i, line in enumerate(lines, start=1):
+        fence_match = _FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)[0] * 3
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        heading = _HEADING_RE.match(line)
+        if heading:
+            found_heading = True
+            if i > start:
+                sections.append((symbol, start, i - 1))
+            symbol = heading.group(2)
+            start = i
+    sections.append((symbol, start, len(lines)))
+
+    # A file with no headings gains nothing here — let the window splitter,
+    # which carries overlap between chunks, handle it instead.
+    if not found_heading:
+        return None
+
+    return [
+        Chunk(path, "markdown", symbol, s, e, _slice(lines, s, e))
+        for symbol, s, e in sections
+        if _slice(lines, s, e).strip()
+    ]
+
+
 def _chunk_generic(path: str, text: str, language: str) -> list[Chunk]:
     lines = text.splitlines()
     if not lines:
@@ -160,10 +285,14 @@ def _chunk_generic(path: str, text: str, language: str) -> list[Chunk]:
         buf_len += len(line) + 1
         if buf_len >= max_chars:
             flush(i)
-            # carry an overlap tail so context isn't cut mid-thought
+            # Carry an overlap tail so context isn't cut mid-thought. The tail
+            # must stay within the overlap budget: taking a line that overshoots
+            # it re-emits that line as a whole extra chunk at the final flush,
+            # which for a single over-long line (a minified bundle) duplicated
+            # the entire file.
             tail, tail_len, kept = [], 0, 0
             for prev in reversed(buf):
-                if tail_len >= overlap:
+                if tail_len + len(prev) + 1 > overlap:
                     break
                 tail.insert(0, prev)
                 tail_len += len(prev) + 1

@@ -126,6 +126,9 @@ KB_EXCERPT_CONCURRENCY = _bounded_int("KB_EXCERPT_CONCURRENCY", 4, 1, 32)
 # tokenizer dependency; STATE_DB is the incremental manifest.
 CHUNK_MAX_CHARS = _bounded_int("CHUNK_MAX_CHARS", 2000, 256, 16000)
 CHUNK_OVERLAP_CHARS = _bounded_int("CHUNK_OVERLAP_CHARS", 200, 0, 15999)
+# Chunks per embedding request. A large file can produce hundreds of chunks;
+# sending them as one request is what makes the embedder time out or OOM.
+EMBED_BATCH_SIZE = _bounded_int("EMBED_BATCH_SIZE", 32, 1, 512)
 STATE_DB = os.environ.get(
     "STATE_DB", str(Path(__file__).resolve().parent.parent / "ingest" / "state.db")
 ).strip()
@@ -364,6 +367,7 @@ CONFIG_FIELDS = (
         "group": "ingest",
         "type": "int",
     },
+    {"name": "EMBED_BATCH_SIZE", "label": "Embed batch size", "group": "ingest", "type": "int"},
     # --- Server ---
     {
         "name": "ADMIN_HOST",
@@ -395,6 +399,7 @@ INT_CONFIG_RANGES = {
     "HYBRID_KIWIX_CANDIDATES": (1, 100),
     "CHUNK_MAX_CHARS": (256, 16000),
     "CHUNK_OVERLAP_CHARS": (0, 15999),
+    "EMBED_BATCH_SIZE": (1, 512),
     "ADMIN_PORT": (1, 65535),
 }
 RESTART_CONFIG_FIELDS = {
