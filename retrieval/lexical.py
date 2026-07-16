@@ -18,6 +18,41 @@ from mcp_gateway.limits import clamp_limit, response_bytes, validate_query
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
+# Conversational scaffolding a model tends to copy from the user's phrasing
+# straight into its lexical query (e.g. it turns "tell me a fun fact about the
+# Roman Empire" into the query "Roman Empire fun facts"). Two kinds of words:
+# classic stopwords, and "meta framing" words (fun/facts/random/trivia...).
+# The framing words are the real problem for a Xapian-backed kiwix index: they
+# are rare, high-weight tokens that occur as literal "Fun Facts" section headers
+# and citations across unrelated articles (Broccoli, Paris...), so an OR-ish
+# match floats those to the top and buries the actual subject. Stripping this
+# scaffolding before search lets the entity terms rank. Only used for the
+# *lexical* pattern and excerpt centering — the display query and the dense
+# embedding query keep the user's full phrasing.
+QUERY_FILLER = frozenset(
+    # question / command openers
+    "tell me give show list find explain describe define what whats which who "
+    "whose where when why how is are was were do does did can could would will "
+    "please i want need know get share".split()
+    # articles / prepositions / conjunctions
+    + "a an the some any of about for on to in with and or as at by from".split()
+    # trivia / "info about X" framing — the high-IDF offenders
+    + "fun facts fact random trivia interesting cool thing things info "
+    "information detail details more something anything quick".split()
+)
+_FILLER_STRIP = ".,!?;:\"'()[]"
+
+
+def normalize_query(query: str) -> str:
+    """Strip conversational scaffolding so lexical search ranks on content terms.
+
+    Falls back to the original query if stripping would leave nothing (e.g. the
+    query really is "The Who" or "facts"), so a legitimate all-filler title still
+    searches. Token punctuation is only stripped for the membership test — kept
+    tokens are emitted verbatim so "COVID-19" survives intact."""
+    kept = [w for w in query.split() if w.strip(_FILLER_STRIP).lower() not in QUERY_FILLER]
+    return " ".join(kept).strip() or query.strip()
+
 
 @dataclass
 class Hit:
@@ -73,7 +108,7 @@ async def kiwix_search(query: str, limit: int, books: list[str] | None = None) -
     limit = clamp_limit(limit, config.KB_SEARCH_LIMIT)
 
     params: dict[str, str | list[str]] = {
-        "pattern": query,
+        "pattern": normalize_query(query),
         "pageLength": str(limit),
         "format": "xml",
     }

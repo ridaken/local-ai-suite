@@ -47,6 +47,31 @@ def _run_with_transport(monkeypatch, coro_factory):
     return result, seen
 
 
+def test_normalize_query_strips_conversational_filler():
+    # The bug: a model turned "tell me a fun fact about the Roman Empire" into the
+    # lexical query "Roman Empire fun facts"; "fun facts" are rare high-weight
+    # tokens in kiwix that floated Broccoli/Paris above the Roman Empire article.
+    assert lexical.normalize_query("Roman Empire fun facts") == "Roman Empire"
+    assert lexical.normalize_query("tell me some interesting facts about Rome") == "Rome"
+    assert lexical.normalize_query("what is the capital of France") == "capital France"
+
+
+def test_normalize_query_preserves_content_and_falls_back():
+    # Hyphenated/technical tokens survive intact.
+    assert lexical.normalize_query("COVID-19 vaccine") == "COVID-19 vaccine"
+    # An all-filler query (a real title) must not be emptied to nothing.
+    assert lexical.normalize_query("The Who") == "The Who"
+    assert lexical.normalize_query("facts") == "facts"
+
+
+def test_kiwix_search_sends_normalized_pattern(monkeypatch):
+    _hits, seen = _run_with_transport(
+        monkeypatch,
+        lambda: lexical.kiwix_search("Roman Empire fun facts", 5),
+    )
+    assert seen["url"].params.get("pattern") == "Roman Empire"
+
+
 def test_kiwix_search_empty_book_allowlist_returns_no_hits(monkeypatch):
     class _NoHttpClient:
         def __init__(self, *args, **kwargs):

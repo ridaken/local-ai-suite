@@ -30,6 +30,16 @@ def test_best_excerpt_ignores_stopwords_for_placement():
     assert "Symptoms of hypothyroidism include" in ex or "symptoms" in ex.lower()
 
 
+def test_best_excerpt_ignores_conversational_filler_for_placement():
+    # "facts" is filler, and here appears only in the navbox tail. It must not be
+    # treated as a content term and pin the excerpt to that tail; the real content
+    # term ("symptoms") should still drive placement.
+    article = _ARTICLE + " Interesting facts and trivia about the Abadie sign."
+    ex = best_excerpt(article, "hypothyroidism fun facts symptoms", 120)
+    assert "tiredness" in ex
+    assert "trivia about the Abadie" not in ex
+
+
 def test_best_excerpt_falls_back_to_lead_when_no_term_matches():
     ex = best_excerpt(_ARTICLE, "zzzquux nonsense", 40)
     assert ex.startswith("Hypothyroidism is a condition")
