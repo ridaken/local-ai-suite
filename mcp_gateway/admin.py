@@ -12,20 +12,30 @@ ZIM_DIR.
 
 from __future__ import annotations
 
+import hmac
 import html
 import shutil
 from pathlib import Path
+from urllib.parse import parse_qsl, quote
 
 import httpx
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse
+from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from . import catalog as catalog_client
 from . import config, recommendations, zim_library
 from .catalog import CatalogEntry
 from .downloads import DownloadManager, delete_zim
+from .security import (
+    SESSION_COOKIE,
+    AdminAuthMiddleware,
+    AdminSecurity,
+    AdminSession,
+    SecurityHeadersMiddleware,
+)
 from .settings_store import SettingsStore
 
 # Two-tier navigation. The primary tabs collapse the seven pages into three
@@ -167,16 +177,31 @@ def _fulltext_badge(has_fulltext_index: bool | None) -> str:
     return ""
 
 
-def _download_action(entry: CatalogEntry, zim_dir_path: Path | None) -> str:
+def _download_action(
+    entry: CatalogEntry,
+    zim_dir_path: Path | None,
+    *,
+    security: AdminSecurity,
+    session: AdminSession,
+    csrf_token: str,
+) -> str:
     if not entry.download_url:
         return '<span class="muted">unavailable</span>'
     if zim_dir_path is None:
         return '<span class="muted">set ZIM_DIR first</span>'
+    if entry.size_bytes is None:
+        return '<span class="muted">unavailable: catalog size unknown</span>'
     filename = entry.download_url.rsplit("/", 1)[-1]
+    action = security.issue_download_action(
+        session,
+        url=entry.download_url,
+        filename=filename,
+        expected_bytes=entry.size_bytes,
+    )
     return (
         '<form method="post" action="/sources/download">'
-        f'<input type="hidden" name="url" value="{html.escape(entry.download_url)}">'
-        f'<input type="hidden" name="filename" value="{html.escape(filename)}">'
+        f'<input type="hidden" name="csrf_token" value="{html.escape(csrf_token)}">'
+        f'<input type="hidden" name="action" value="{html.escape(action)}">'
         '<button type="submit">Download</button></form>'
     )
 
@@ -210,10 +235,59 @@ def build_admin_app(
     download_manager: DownloadManager,
     zim_dir: str,
     library_xml_path: str,
+    admin_token: str | None = None,
+    allowed_hosts: list[str] | None = None,
+    allowed_origins: list[str] | None = None,
+    cookie_secure: bool | None = None,
 ) -> Starlette:
     initial_zim_dir = zim_dir
     initial_library_xml_path = library_xml_path
-    config.apply_runtime_overrides(settings.config_values())
+    admin_token = admin_token if admin_token is not None else config.ADMIN_TOKEN
+    if not admin_token:
+        raise ValueError("ADMIN_TOKEN is required for the admin service")
+    security = AdminSecurity(
+        admin_token,
+        allowed_hosts=allowed_hosts or config.ADMIN_ALLOWED_HOSTS,
+        allowed_origins=allowed_origins or config.ADMIN_ALLOWED_ORIGINS,
+        cookie_secure=config.ADMIN_COOKIE_SECURE if cookie_secure is None else cookie_secure,
+    )
+
+    async def _urlencoded_form(request: Request) -> dict[str, str]:
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type not in {"", "application/x-www-form-urlencoded"}:
+            return {}
+        chunks = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > 64 * 1024:
+                raise HTTPException(413, "form is too large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
+        if not body and not content_type:
+            return {}
+        if content_type != "application/x-www-form-urlencoded":
+            return {}
+        return dict(parse_qsl(body.decode("utf-8"), keep_blank_values=True))
+
+    def _session(request: Request) -> AdminSession:
+        return request.state.admin_session
+
+    def _csrf_input(request: Request) -> str:
+        return (
+            '<input type="hidden" name="csrf_token" value="'
+            + html.escape(_session(request).csrf_token)
+            + '">'
+        )
+
+    async def _mutation_form(request: Request):  # noqa: ANN202
+        if not security.origin_allowed(request):
+            return None, PlainTextResponse("invalid Origin header", status_code=403)
+        form = await _urlencoded_form(request)
+        supplied = str(form.get("csrf_token", ""))
+        if not hmac.compare_digest(supplied, _session(request).csrf_token):
+            return None, PlainTextResponse("invalid CSRF token", status_code=403)
+        return form, None
 
     def _zim_dir_path() -> Path | None:
         current = str(config.ZIM_DIR or initial_zim_dir).strip()
@@ -237,6 +311,45 @@ def build_admin_app(
         if zim_path and library_path:
             zim_library.refresh_library(zim_path, library_path)
 
+    async def login(request: Request) -> Response:
+        if request.method == "GET":
+            body = """
+            <h2>Administrator login</h2>
+            <form method="post" action="/login">
+              <label>Admin token <input type="password" name="token"
+                autocomplete="current-password" required></label>
+              <button type="submit">Log in</button>
+            </form>
+            """
+            return _page("Login", body)
+        if not security.origin_allowed(request):
+            return PlainTextResponse("invalid Origin header", status_code=403)
+        form = await _urlencoded_form(request)
+        if not security.authenticate(str(form.get("token", ""))):
+            return _page("Login", '<p class="error">Invalid admin token.</p>', current_path="/")
+        security.invalidate(request)
+        session = security.create_session()
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE,
+            session.session_id,
+            max_age=8 * 60 * 60,
+            httponly=True,
+            secure=security.cookie_secure,
+            samesite="strict",
+            path="/",
+        )
+        return response
+
+    async def logout(request: Request) -> Response:
+        _form, error = await _mutation_form(request)
+        if error:
+            return error
+        security.invalidate(request)
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return response
+
     async def dashboard(request: Request) -> HTMLResponse:
         kiwix_status, qdrant_status, embed_status, rerank_status = [
             await _reachable(url)
@@ -254,6 +367,9 @@ def build_admin_app(
                 f"({_human_bytes(usage.free)} free)</p>"
             )
         body = f"""
+        <form method="post" action="/logout" style="float:right">
+          {_csrf_input(request)}<button type="submit">Log out</button>
+        </form>
         <h2>Services</h2>
         <table>
           <tr><th>kiwix</th><td>{_badge(kiwix_status)}</td></tr>
@@ -292,13 +408,11 @@ def build_admin_app(
                 f"<td>{'enabled' if enabled else 'disabled'}</td>"
                 f"<td>"
                 f'<form class="inline" method="post" action="/sources/toggle">'
+                f'{_csrf_input(request)}'
                 f'<input type="hidden" name="name" value="{html.escape(b.name)}">'
                 f'<input type="hidden" name="enabled" value="{"0" if enabled else "1"}">'
                 f"<button type=\"submit\">{toggle_label}</button></form> "
-                f'<form class="inline" method="post" action="/sources/delete" '
-                f'onsubmit="return confirm(\'Delete {html.escape(b.filename)}?\')">'
-                f'<input type="hidden" name="filename" value="{html.escape(b.filename)}">'
-                f'<button type="submit">Delete</button></form>'
+                f'<a href="/sources/delete/confirm?filename={quote(b.filename)}">Delete</a>'
                 f"</td></tr>"
             )
         empty_note = (
@@ -315,16 +429,35 @@ def build_admin_app(
         body = f"<h2>Installed sources</h2>{table}"
         return _render(request, "Installed sources", body)
 
-    async def sources_toggle(request: Request) -> RedirectResponse:
-        form = await request.form()
+    async def sources_toggle(request: Request) -> Response:
+        form, error = await _mutation_form(request)
+        if error:
+            return error
+        assert form is not None
         name = str(form.get("name", ""))
         enabled = str(form.get("enabled", "1")) == "1"
         if name:
             settings.set_book_enabled(name, enabled)
         return RedirectResponse("/sources", status_code=303)
 
-    async def sources_delete(request: Request) -> RedirectResponse:
-        form = await request.form()
+    async def sources_delete_confirm(request: Request) -> HTMLResponse:
+        filename = str(request.query_params.get("filename", ""))
+        body = (
+            "<h2>Confirm deletion</h2>"
+            f"<p>Delete <code>{html.escape(filename)}</code>?</p>"
+            '<form method="post" action="/sources/delete">'
+            f"{_csrf_input(request)}"
+            f'<input type="hidden" name="filename" value="{html.escape(filename)}">'
+            '<button type="submit">Delete permanently</button> '
+            '<a href="/sources">Cancel</a></form>'
+        )
+        return _render(request, "Confirm deletion", body)
+
+    async def sources_delete(request: Request) -> Response:
+        form, error = await _mutation_form(request)
+        if error:
+            return error
+        assert form is not None
         filename = str(form.get("filename", ""))
         zim_path = _zim_dir_path()
         if filename and zim_path:
@@ -347,12 +480,19 @@ def build_admin_app(
             rows = []
             for e in entries:
                 fts_note = _fulltext_badge(e.has_fulltext_index)
+                action = _download_action(
+                    e,
+                    _zim_dir_path(),
+                    security=security,
+                    session=_session(request),
+                    csrf_token=_session(request).csrf_token,
+                )
                 rows.append(
                     f"<tr><td>{html.escape(e.title)}<br>"
                     f'<span class="muted">{html.escape(e.name)} &middot; '
                     f"{html.escape(e.language)} &middot; "
                     f"{e.article_count:,} articles &middot; {_human_bytes(e.size_bytes)}</span>"
-                    f"{fts_note}</td><td>{_download_action(e, _zim_dir_path())}</td></tr>"
+                    f"{fts_note}</td><td>{action}</td></tr>"
                 )
             results_html = (
                 "<table><tr><th>Book</th><th>Action</th></tr>" + "".join(rows) + "</table>"
@@ -399,7 +539,13 @@ def build_admin_app(
             action = (
                 '<span class="badge ok">installed</span>'
                 if entry.name in installed
-                else _download_action(entry, _zim_dir_path())
+                else _download_action(
+                    entry,
+                    _zim_dir_path(),
+                    security=security,
+                    session=_session(request),
+                    csrf_token=_session(request).csrf_token,
+                )
             )
             rows.append(
                 f"<tr><td>{html.escape(rec.label)}<br>"
@@ -422,21 +568,37 @@ def build_admin_app(
         )
         return _render(request, "Recommended", body)
 
-    async def sources_download(request: Request) -> RedirectResponse:
-        form = await request.form()
-        url = str(form.get("url", ""))
-        filename = str(form.get("filename", ""))
+    async def sources_download(request: Request) -> Response:
+        form, error = await _mutation_form(request)
+        if error:
+            return error
+        assert form is not None
         zim_path = _zim_dir_path()
-        if url and filename and zim_path is not None:
+        if zim_path is not None:
             try:
+                payload = security.consume_download_action(
+                    _session(request), str(form.get("action", ""))
+                )
                 download_manager.zim_dir = zim_path
-                download_manager.start(url, filename)
+                download_manager.start(
+                    str(payload["url"]),
+                    str(payload["filename"]),
+                    expected_bytes=int(payload["expected_bytes"]),
+                )
             except ValueError:
-                pass
+                return RedirectResponse(
+                    "/downloads?error=Download%20request%20was%20rejected",
+                    status_code=303,
+                )
         return RedirectResponse("/downloads", status_code=303)
 
     async def downloads_page(request: Request) -> HTMLResponse:
         jobs = download_manager.list_jobs()
+        error_notice = (
+            '<p class="error">Download request was rejected.</p>'
+            if request.query_params.get("error")
+            else ""
+        )
         in_flight = any(j.status in ("queued", "downloading") for j in jobs)
         refresh = '<meta http-equiv="refresh" content="4">' if in_flight else ""
         rows = []
@@ -457,7 +619,7 @@ def build_admin_app(
             if rows
             else "<p class='muted'>No downloads yet.</p>"
         )
-        body = f"<h2>Downloads</h2>{table}"
+        body = f"<h2>Downloads</h2>{error_notice}{table}"
         return _render(request, "Downloads", body, extra_head=refresh)
 
     async def settings_page(request: Request) -> HTMLResponse:
@@ -474,6 +636,7 @@ def build_admin_app(
         body = f"""
         <h2>Retrieval settings</h2>
         <form method="post" action="/settings/update">
+          {_csrf_input(request)}
           <fieldset>
             <legend>Retrieval mode</legend>
             {radio("hybrid", "Hybrid (lexical + vector, reranked)")}
@@ -489,8 +652,11 @@ def build_admin_app(
         """
         return _render(request, "Retrieval settings", body)
 
-    async def settings_update(request: Request) -> RedirectResponse:
-        form = await request.form()
+    async def settings_update(request: Request) -> Response:
+        form, error = await _mutation_form(request)
+        if error:
+            return error
+        assert form is not None
         mode = str(form.get("mode", "hybrid"))
         if mode in ("hybrid", "lexical", "vector"):
             settings.set_retrieval_mode(mode)
@@ -504,21 +670,14 @@ def build_admin_app(
         return section
 
     async def configuration_page(request: Request) -> HTMLResponse:
-        saved = settings.config_values()
         section = _config_section(request)
 
         def row(field: dict[str, object]) -> str:
             name = str(field["name"])
-            is_secret = bool(field.get("secret"))
-            current = "" if is_secret else saved.get(name, str(getattr(config, name, "")))
-            input_type = "number" if field.get("type") == "int" else "text"
-            if is_secret:
-                input_type = "password"
-            autocomplete = " autocomplete='new-password'" if is_secret else ""
-            placeholder = " placeholder='Leave blank to keep current value'" if is_secret else ""
+            current = "configured" if field.get("secret") and getattr(config, name, "") else (
+                "not configured" if field.get("secret") else str(getattr(config, name, ""))
+            )
             help_text = str(field.get("help", ""))
-            if field.get("restart"):
-                help_text = (help_text + " " if help_text else "") + "Requires restart."
             help_html = (
                 f'<span class="muted field-help">{html.escape(help_text)}</span>'
                 if help_text
@@ -527,8 +686,7 @@ def build_admin_app(
             return (
                 f"<tr><th>{html.escape(str(field.get('label', name)))}"
                 f"<br><span class='muted'>{html.escape(name)}</span></th>"
-                f"<td><input class='config-input' type='{input_type}' name='{html.escape(name)}' "
-                f"value='{html.escape(str(current), quote=True)}'{autocomplete}{placeholder}>"
+                f"<td><code>{html.escape(str(current))}</code>"
                 f"{help_html}</td></tr>"
             )
 
@@ -541,51 +699,27 @@ def build_admin_app(
             row(field) for field in config.CONFIG_FIELDS if field.get("group") == section
         )
         body = f"""
-        <h2>Gateway configuration</h2>
-        <p class="muted">Values saved here override environment/config file values for the gateway.
-        Most tool endpoints and API keys apply immediately; bind addresses, ports, settings database
-        moves, and Docker volume paths still need a restart or compose recreation.</p>
+        <h2>Effective configuration</h2>
+        <p class="muted">Infrastructure, endpoints, paths, and secrets are read-only here.
+        Change environment variables or mounted secret files, then restart the affected service.
+        Secret values are never displayed or persisted by the admin UI.</p>
         <nav class="section-tabs">{section_tabs}</nav>
-        <form method="post" action="/configuration/update">
-          <input type="hidden" name="section" value="{html.escape(section)}">
-          <table><tr><th>Setting</th><th>Value</th></tr>{rows}</table>
-          <button type="submit">Save this section</button>
-        </form>
+        <table><tr><th>Setting</th><th>Effective value</th></tr>{rows}</table>
         """
         return _render(request, "Configuration", body)
 
-    async def configuration_update(request: Request) -> RedirectResponse:
-        form = await request.form()
-        section = str(form.get("section", ""))
-        if section not in config.CONFIG_GROUP_KEYS:
-            section = config.CONFIG_GROUP_KEYS[0]
-        saved = settings.config_values()
-        # Start from every persisted value so saving one section never blanks the
-        # fields on the others (they aren't submitted with this form).
-        values: dict[str, str] = dict(saved)
-        for field in config.CONFIG_FIELDS:
-            if field.get("group") != section:
-                continue
-            name = str(field["name"])
-            value = str(form.get(name, ""))
-            if field.get("secret") and not value:
-                continue  # keep the existing secret (already in values via saved)
-            if field.get("type") == "int":
-                try:
-                    value = str(int(value.strip()))
-                except ValueError:
-                    continue  # keep the existing value on a bad int
-            settings.set_config_value(name, value)
-            values[name] = value
-        config.apply_runtime_overrides(values)
-        _refresh_library()
-        return RedirectResponse(f"/configuration?section={section}", status_code=303)
+    async def healthz(_request: Request) -> Response:
+        return PlainTextResponse("ok")
 
-    return Starlette(
+    app = Starlette(
         routes=[
+            Route("/login", login, methods=["GET", "POST"]),
+            Route("/logout", logout, methods=["POST"]),
+            Route("/healthz", healthz),
             Route("/", dashboard),
             Route("/sources", sources),
             Route("/sources/toggle", sources_toggle, methods=["POST"]),
+            Route("/sources/delete/confirm", sources_delete_confirm),
             Route("/sources/delete", sources_delete, methods=["POST"]),
             Route("/sources/download", sources_download, methods=["POST"]),
             Route("/recommendations", recommendations_page),
@@ -594,6 +728,9 @@ def build_admin_app(
             Route("/settings", settings_page),
             Route("/settings/update", settings_update, methods=["POST"]),
             Route("/configuration", configuration_page),
-            Route("/configuration/update", configuration_update, methods=["POST"]),
         ]
     )
+    app.add_middleware(AdminAuthMiddleware, security=security)
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.state.admin_security = security
+    return app

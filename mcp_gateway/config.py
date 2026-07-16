@@ -25,6 +25,20 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _secret(name: str) -> str:
+    """Read a secret from NAME or NAME_FILE, never both."""
+    direct = os.environ.get(name, "").strip()
+    file_name = os.environ.get(f"{name}_FILE", "").strip()
+    if direct and file_name:
+        raise ValueError(f"set only one of {name} or {name}_FILE")
+    if file_name:
+        try:
+            return Path(file_name).read_text(encoding="utf-8").rstrip("\r\n")
+        except OSError as exc:
+            raise ValueError(f"could not read {name}_FILE") from exc
+    return direct.strip()
+
+
 # Kiwix (offline KB, full-text search)
 DATA_ROOT = os.environ.get("DATA_ROOT", "").strip()
 # KIWIX_URL is how the gateway reaches kiwix-serve to fetch/search — under
@@ -39,11 +53,11 @@ KIWIX_PUBLIC_URL = (os.environ.get("KIWIX_PUBLIC_URL", "").strip() or KIWIX_URL)
 KIWIX_BOOK = os.environ.get("KIWIX_BOOK", "").strip()
 
 # Web search (Kagi)
-KAGI_API_KEY = os.environ.get("KAGI_API_KEY", "").strip()
+KAGI_API_KEY = _secret("KAGI_API_KEY")
 KAGI_SEARCH_URL = os.environ.get("KAGI_SEARCH_URL", "https://kagi.com/api/v0/search").strip()
 
 # PubMed (NCBI E-utilities)
-NCBI_API_KEY = os.environ.get("NCBI_API_KEY", "").strip()
+NCBI_API_KEY = _secret("NCBI_API_KEY")
 NCBI_EMAIL = os.environ.get("NCBI_EMAIL", "").strip()
 NCBI_TOOL = os.environ.get("NCBI_TOOL", "local-ai-suite").strip()
 NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -110,9 +124,10 @@ def vector_tier_enabled() -> bool:
 # --- Phase 3: management plane -------------------------------------------------
 # Runtime toggles (retrieval mode, rerank on/off, per-book enable/disable) live
 # here, separate from state.db (the ingest manifest).
-SETTINGS_DB = os.environ.get(
-    "SETTINGS_DB", str(Path(__file__).resolve().parent.parent / "ingest" / "settings.db")
+STATE_DIR = os.environ.get(
+    "STATE_DIR", str(Path(__file__).resolve().parent.parent / "data" / "state")
 ).strip()
+SETTINGS_DB = os.environ.get("SETTINGS_DB", str(Path(STATE_DIR) / "settings.db")).strip()
 
 # Where downloaded ZIMs land and where library.xml is generated for kiwix's
 # --library --monitorLibrary mode. Defaults to ZIM_DIR itself (one bind mount
@@ -141,7 +156,43 @@ LIBRARY_XML_PATH = os.environ.get("LIBRARY_XML_PATH", "").strip() or (
 # Admin UI + MCP-over-HTTP bind address. Loopback by default — LAN exposure is
 # an explicit opt-in, not the default, since the admin UI has no auth of its own.
 ADMIN_HOST = os.environ.get("ADMIN_HOST", "127.0.0.1").strip()
-ADMIN_PORT = _int("ADMIN_PORT", 8090)
+ADMIN_PORT = _int("ADMIN_PORT", 8091)
+MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1").strip()
+MCP_PORT = _int("MCP_PORT", 8090)
+
+# HTTP credentials. Stdio does not require MCP_API_KEY.
+ADMIN_TOKEN = _secret("ADMIN_TOKEN")
+MCP_API_KEY = _secret("MCP_API_KEY")
+MCPO_API_KEY = _secret("MCPO_API_KEY")
+ADMIN_COOKIE_SECURE = os.environ.get("ADMIN_COOKIE_SECURE", "0").strip().lower() in {
+    "1", "true", "yes",
+}
+ADMIN_ALLOWED_HOSTS = [
+    value.strip().lower()
+    for value in os.environ.get(
+        "ADMIN_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1],las-admin"
+    ).split(",")
+    if value.strip()
+]
+ADMIN_ALLOWED_ORIGINS = [
+    value.strip().rstrip("/")
+    for value in os.environ.get(
+        "ADMIN_ALLOWED_ORIGINS", "http://localhost:8091,http://127.0.0.1:8091"
+    ).split(",")
+    if value.strip()
+]
+
+# Downloads are intentionally restricted to official Kiwix distribution hosts.
+DOWNLOAD_MAX_BYTES = _int("DOWNLOAD_MAX_BYTES", 200 * 1024**3)
+DOWNLOAD_MIN_FREE_BYTES = _int("DOWNLOAD_MIN_FREE_BYTES", 2 * 1024**3)
+DOWNLOAD_MAX_CONCURRENCY = _int("DOWNLOAD_MAX_CONCURRENCY", 1)
+DOWNLOAD_ALLOWED_HOSTS = [
+    value.strip().lower()
+    for value in os.environ.get(
+        "DOWNLOAD_ALLOWED_HOSTS", "download.kiwix.org,*.download.kiwix.org"
+    ).split(",")
+    if value.strip()
+]
 
 # Kiwix OPDS catalog (browse available ZIMs to download).
 KIWIX_CATALOG_URL = os.environ.get(
@@ -340,3 +391,31 @@ def apply_runtime_overrides(values: dict[str, str]) -> list[str]:
     version = os.environ.get("LAS_VERSION", "0.1.0")
     globals()["USER_AGENT"] = f"local-ai-suite/{version} (mcp-gateway)"
     return restart_needed
+
+
+_PLACEHOLDER_SECRETS = {"change-me", "changeme", "replace-me", "secret", "password"}
+_PLACEHOLDER_MARKERS = ("replace this", "placeholder", "example token", "example key")
+
+
+def _validate_secret(name: str, value: str, *, required: bool = True) -> None:
+    if not value:
+        if required:
+            raise ValueError(f"{name} is required")
+        return
+    lowered = value.lower()
+    if lowered in _PLACEHOLDER_SECRETS or any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
+        raise ValueError(f"{name} uses an insecure placeholder")
+    if len(value) < 32:
+        raise ValueError(f"{name} must be at least 32 characters")
+
+
+def validate_http_security(*, admin: bool = False, mcp: bool = False, mcpo: bool = False) -> None:
+    """Fail closed for hosted surfaces while leaving stdio credential-free."""
+    _validate_secret("ADMIN_TOKEN", ADMIN_TOKEN, required=admin)
+    _validate_secret("MCP_API_KEY", MCP_API_KEY, required=mcp)
+    _validate_secret("MCPO_API_KEY", MCPO_API_KEY, required=mcpo)
+    configured = [value for value in (ADMIN_TOKEN, MCP_API_KEY, MCPO_API_KEY) if value]
+    if len(configured) != len(set(configured)):
+        raise ValueError("ADMIN_TOKEN, MCP_API_KEY, and MCPO_API_KEY must be distinct")
+    if "*" in MCP_ALLOWED_HOSTS:
+        raise ValueError("MCP_ALLOWED_HOSTS may not contain '*' in hosted mode")
