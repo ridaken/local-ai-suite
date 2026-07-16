@@ -111,11 +111,14 @@ def render_search(response: SearchResponse, *, heading: str, footer: str = "") -
     """Readable fallback for a SearchResponse."""
     if response.error:
         return f"{response.error.message}"
+    if not response.results:
+        # Say why it was empty when a tier was down: "no results" and "no results
+        # because half the pipeline is unreachable" call for different actions.
+        suffix = f" ({'; '.join(response.warnings)})" if response.warnings else ""
+        return f'No results for "{response.query}"{suffix}.'
     lines = [f'{heading} for "{response.query}":', ""]
     for warning in response.warnings:
         lines += [f"Warning: partial results ({warning}).", ""]
-    if not response.results:
-        return f'No results for "{response.query}".'
     for i, r in enumerate(response.results, start=1):
         lines.append(f"{i}. [{r.source_kind}] {r.title}")
         if r.excerpt:

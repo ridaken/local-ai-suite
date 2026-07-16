@@ -143,13 +143,20 @@ async def hybrid_search(
     settled = await asyncio.gather(*(coro for _label, coro in jobs), return_exceptions=True)
 
     ranked_lists: list[list[Candidate]] = []
+    survived = 0
     for (label, _coro), outcome in zip(jobs, settled, strict=True):
         if isinstance(outcome, BaseException):
             notes.append(f"{label} unavailable ({type(outcome).__name__})")
             continue
+        survived += 1
         ranked_lists.append(_dedup(outcome))
 
     if not any(ranked_lists):
+        # A tier that ran and found nothing is not an outage. Only report an
+        # error when nothing was able to answer at all — otherwise a query with
+        # genuinely no matches looks like a broken deployment.
+        if survived:
+            return HybridResult([], error=None, warning="; ".join(notes) or None)
         return HybridResult([], error="; ".join(notes) or None)
 
     candidates = _fuse(ranked_lists)

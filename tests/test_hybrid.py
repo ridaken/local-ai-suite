@@ -224,6 +224,33 @@ def test_rerank_disabled_falls_back_to_score_order(monkeypatch, tmp_path):
     assert len(result.candidates) == 2
 
 
+def test_surviving_tier_with_no_hits_is_not_an_error(monkeypatch, tmp_path):
+    """"Nothing matched" and "the pipeline is down" are different answers: a
+    query with no hits must not look like a broken deployment just because one
+    tier happened to be unavailable."""
+
+    async def empty_kiwix(_q, _n, books=None):
+        return []
+
+    async def boom_embed(_q):
+        raise RuntimeError("no embedder")
+
+    monkeypatch.setattr(hybrid, "kiwix_search", empty_kiwix)
+
+    result = asyncio.run(
+        hybrid_search(
+            "query matching nothing",
+            top_k=5,
+            embed_fn=boom_embed,
+            client=QdrantClient(":memory:"),
+            settings=SettingsStore(tmp_path / "settings.db"),
+        )
+    )
+    assert result.candidates == []
+    assert result.error is None
+    assert result.warning == "vector tier unavailable (RuntimeError)"
+
+
 def test_tiers_run_concurrently(monkeypatch, tmp_path):
     """Lexical and vector work must overlap in time, not run back to back."""
     order = []

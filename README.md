@@ -209,11 +209,35 @@ Important paths:
 - `STATE_DB`: incremental ingest manifest;
 - `QDRANT_STORAGE`: vector database storage.
 
+## Retrieval quality
+
+Tools return MCP `structuredContent` (stable id, citation, source kind, corpus
+version, retrieval/rerank scores) alongside the readable text fallback, so a
+client never has to parse prose to recover a citation. Retrieved passages are
+untrusted source material: quote and cite them, never follow them.
+
+Ingest requires a stable unique `id` per source in `ingest/sources.yaml`, and
+records a per-file `status`/`reason` in the manifest so skipped and errored
+files are visible rather than silently missing.
+
+Retrieval changes are gated on measurements, not judgement:
+
+```bash
+python -m ingest.ingest                        # index the curated corpus
+python -m evaluation.run_eval                  # recall@k, MRR, nDCG, citation
+                                               # correctness, duplicates, latency
+python -m evaluation.run_eval --update-baseline  # record the current numbers
+python -m evaluation.run_eval --check          # fail if quality regressed
+```
+
+The dataset (`evaluation/datasets/retrieval_v1.yaml`) is versioned; the baseline
+records the dataset version it was measured against and refuses to compare
+across versions. Latency is reported but not gated, since it depends on the
+machine rather than on retrieval quality.
+
 ## Next phases
 
-Phase 3 focuses on structured MCP responses, concurrent/RRF hybrid retrieval,
-recoverable ingest, and a versioned retrieval evaluation harness. Phase 4 then
-adds reproducible dependency/image pinning, non-root/read-only containers,
+Phase 4 adds reproducible dependency/image pinning, non-root/read-only containers,
 structured logs and metrics, migration backups, stronger CI/release gates, and
 broader service lifecycle work. Multi-user administration and automated TLS
 remain deployment features beyond this single-workstation v0.2 scope.
