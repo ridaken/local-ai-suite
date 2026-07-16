@@ -47,7 +47,7 @@ def test_enrich_replaces_kiwix_snippet_with_fetched_excerpt(monkeypatch):
         Candidate(title="chunk", text="curated text", citation="repo/x.py", source="curated"),
     ]
 
-    async def fake_excerpt(source, query, size):
+    async def fake_excerpt(source, query, size, *, client=None):
         return "Symptoms include tiredness and weight gain."
 
     monkeypatch.setattr(kb_search_mod, "article_excerpt", fake_excerpt)
@@ -63,7 +63,7 @@ def test_enrich_keeps_original_snippet_when_fetch_fails(monkeypatch):
                   citation="http://kiwix:8080/content/b/A/A", source="kb"),
     ]
 
-    async def fake_excerpt(source, query, size):
+    async def fake_excerpt(source, query, size, *, client=None):
         return None  # fetch failed
 
     monkeypatch.setattr(kb_search_mod, "article_excerpt", fake_excerpt)
@@ -78,7 +78,7 @@ def test_enrich_survives_fetch_exception(monkeypatch):
                   source="kb"),
     ]
 
-    async def boom(source, query, size):
+    async def boom(source, query, size, *, client=None):
         raise RuntimeError("network exploded")
 
     monkeypatch.setattr(kb_search_mod, "article_excerpt", boom)

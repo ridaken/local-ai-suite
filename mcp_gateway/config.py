@@ -117,6 +117,10 @@ RERANK_MODEL = os.environ.get("RERANK_MODEL", "bge-reranker-v2-m3").strip()
 # and how many survive to the answer.
 HYBRID_VECTOR_CANDIDATES = _bounded_int("HYBRID_VECTOR_CANDIDATES", 20, 1, 100)
 HYBRID_KIWIX_CANDIDATES = _bounded_int("HYBRID_KIWIX_CANDIDATES", 20, 1, 100)
+# kb_search fans out one article fetch per kiwix hit to build excerpts. Bound the
+# fan-out so a single search cannot open KB_SEARCH_LIMIT simultaneous connections
+# to kiwix-serve (they share one pooled client either way).
+KB_EXCERPT_CONCURRENCY = _bounded_int("KB_EXCERPT_CONCURRENCY", 4, 1, 32)
 
 # Ingest / chunking. Sizes are in characters (~4 chars per token) to avoid a
 # tokenizer dependency; STATE_DB is the incremental manifest.

@@ -138,27 +138,40 @@ def test_lexical_mode_skips_vector_tier(monkeypatch, tmp_path):
     assert result.candidates == []
 
 
-def test_vector_tier_disabled_skips_reranker(monkeypatch, tmp_path):
-    async def lexical_hit(_q, _n, books=None):
+def test_vector_tier_disabled_still_reranks_lexical_candidates(monkeypatch, tmp_path):
+    """The reranker is a separate service from the vector tier — with Qdrant off
+    it can still reorder a lexical-only candidate set, which is the whole point
+    of keeping it independent."""
+
+    async def lexical_hits(_q, _n, books=None):
         from retrieval.lexical import Hit
 
-        return [Hit(title="Kiwix", url="http://kiwix/a", snippet="lexical result")]
+        return [
+            Hit(title="Irrelevant", url="http://kiwix/a", snippet="unrelated filler"),
+            Hit(title="Relevant", url="http://kiwix/b", snippet="the answer"),
+        ]
 
-    async def boom_rerank(_query, _documents, _top_n):
-        raise AssertionError("reranker should not be queried when vector tier is disabled")
+    reranked = []
 
-    monkeypatch.setattr(hybrid, "kiwix_search", lexical_hit)
+    async def fake_rerank(_query, documents, top_n):
+        reranked.append(list(documents))
+        order = sorted(range(len(documents)), key=lambda i: 0 if "answer" in documents[i] else 1)
+        return [(i, 1.0) for i in order][:top_n]
+
+    monkeypatch.setattr(hybrid, "kiwix_search", lexical_hits)
     monkeypatch.setattr(hybrid.config, "QDRANT_URL", "")
 
     result = asyncio.run(
         hybrid_search(
             "anything",
             top_k=5,
-            rerank_fn=boom_rerank,
+            rerank_fn=fake_rerank,
             settings=SettingsStore(tmp_path / "settings.db"),
         )
     )
-    assert [c.source for c in result.candidates] == ["kb"]
+    assert reranked, "reranker should run on a lexical-only candidate set"
+    assert [c.source for c in result.candidates] == ["kb", "kb"]
+    assert result.candidates[0].citation == "http://kiwix/b"
 
 
 def test_vector_mode_skips_lexical_tier(monkeypatch, tmp_path):
@@ -209,6 +222,126 @@ def test_rerank_disabled_falls_back_to_score_order(monkeypatch, tmp_path):
     )
     assert result.error is None
     assert len(result.candidates) == 2
+
+
+def test_tiers_run_concurrently(monkeypatch, tmp_path):
+    """Lexical and vector work must overlap in time, not run back to back."""
+    order = []
+
+    async def slow_kiwix(_q, _n, books=None):
+        order.append("kiwix:start")
+        await asyncio.sleep(0.05)
+        order.append("kiwix:end")
+        return []
+
+    async def slow_embed(_q):
+        order.append("embed:start")
+        await asyncio.sleep(0.05)
+        order.append("embed:end")
+        return [1.0] * DIM
+
+    monkeypatch.setattr(hybrid, "kiwix_search", slow_kiwix)
+    settings = SettingsStore(tmp_path / "settings.db")
+    settings.set_rerank_enabled(False)
+
+    asyncio.run(
+        hybrid_search(
+            "anything",
+            top_k=5,
+            embed_fn=slow_embed,
+            client=_seed_client(),
+            settings=settings,
+        )
+    )
+    # Both tiers start before either finishes; serial execution would give
+    # start/end/start/end.
+    assert order[:2] == ["embed:start", "kiwix:start"] or order[:2] == [
+        "kiwix:start",
+        "embed:start",
+    ]
+
+
+def test_fallback_interleaves_tiers_by_rank(monkeypatch, tmp_path):
+    """With the reranker off, RRF must not park every vector hit ahead of every
+    lexical hit — each tier's rank-1 hit should surface near the top."""
+
+    async def lexical_hits(_q, _n, books=None):
+        from retrieval.lexical import Hit
+
+        return [
+            Hit(title="kb-top", url="http://kiwix/1", snippet="kb first"),
+            Hit(title="kb-second", url="http://kiwix/2", snippet="kb second"),
+        ]
+
+    monkeypatch.setattr(hybrid, "kiwix_search", lexical_hits)
+    settings = SettingsStore(tmp_path / "settings.db")
+    settings.set_rerank_enabled(False)
+
+    result = asyncio.run(
+        hybrid_search(
+            "anything",
+            top_k=4,
+            embed_fn=fake_embed,
+            client=_seed_client(),
+            settings=settings,
+        )
+    )
+    sources = [c.source for c in result.candidates]
+    assert len(result.candidates) == 4
+    # Rank-1 from each tier ties on RRF score, so both appear before either
+    # tier's rank-2 hit.
+    assert set(sources[:2]) == {"kb", "curated"}
+    assert set(sources[2:]) == {"kb", "curated"}
+    assert all(c.fusion_score is not None for c in result.candidates)
+
+
+def test_fusion_survives_a_dead_tier(monkeypatch, tmp_path):
+    """One tier failing collapses fusion to the survivor's own order."""
+
+    async def boom_kiwix(_q, _n, books=None):
+        raise ValueError("bad xml")
+
+    monkeypatch.setattr(hybrid, "kiwix_search", boom_kiwix)
+    settings = SettingsStore(tmp_path / "settings.db")
+    settings.set_rerank_enabled(False)
+
+    result = asyncio.run(
+        hybrid_search(
+            "anything",
+            top_k=5,
+            embed_fn=fake_embed,
+            client=_seed_client(),
+            settings=settings,
+        )
+    )
+    assert [c.source for c in result.candidates] == ["curated", "curated"]
+    assert result.warning == "knowledge base unavailable (ValueError)"
+    scores = [c.fusion_score for c in result.candidates]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_candidates_carry_stable_ids(monkeypatch, tmp_path):
+    async def lexical_hit(_q, _n, books=None):
+        from retrieval.lexical import Hit
+
+        return [Hit(title="Kiwix", url="http://kiwix/a", snippet="lexical")]
+
+    monkeypatch.setattr(hybrid, "kiwix_search", lexical_hit)
+    settings = SettingsStore(tmp_path / "settings.db")
+    settings.set_rerank_enabled(False)
+
+    result = asyncio.run(
+        hybrid_search(
+            "anything",
+            top_k=5,
+            embed_fn=fake_embed,
+            client=_seed_client(),
+            settings=settings,
+        )
+    )
+    ids = {c.id for c in result.candidates}
+    assert "kb:http://kiwix/a" in ids
+    assert "curated:c1" in ids
 
 
 def test_enabled_books_are_passed_to_kiwix_search(monkeypatch, tmp_path):

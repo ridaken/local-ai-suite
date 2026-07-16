@@ -86,7 +86,7 @@ def test_window_clamps_negative_offset():
 
 
 def _fake_fetch(html: str, status_code: int = 200):
-    async def fetch(url: str) -> httpx.Response:
+    async def fetch(url: str, *, client=None) -> httpx.Response:
         return httpx.Response(status_code, text=html)
 
     return fetch
@@ -135,7 +135,7 @@ def test_kb_read_offset_past_end(monkeypatch):
 def test_kb_read_rejects_negative_and_excessive_public_offsets(monkeypatch):
     _set_kiwix(monkeypatch)
 
-    async def must_not_fetch(url: str) -> httpx.Response:
+    async def must_not_fetch(url: str, *, client=None) -> httpx.Response:
         raise AssertionError("invalid offsets must be rejected before fetch")
 
     monkeypatch.setattr(kb_read_mod, "_fetch_html", must_not_fetch)
@@ -150,7 +150,7 @@ def test_kb_read_rejects_negative_and_excessive_public_offsets(monkeypatch):
 def test_kb_read_refuses_foreign_host_without_fetching(monkeypatch):
     _set_kiwix(monkeypatch)
 
-    async def must_not_fetch(url: str) -> httpx.Response:
+    async def must_not_fetch(url: str, *, client=None) -> httpx.Response:
         raise AssertionError("foreign host must be rejected before any fetch")
 
     monkeypatch.setattr(kb_read_mod, "_fetch_html", must_not_fetch)
@@ -164,7 +164,7 @@ def test_kb_read_refuses_redirect_to_foreign_host(monkeypatch):
     _set_kiwix(monkeypatch)
     fetched: list[str] = []
 
-    async def fetch(url: str) -> httpx.Response:
+    async def fetch(url: str, *, client=None) -> httpx.Response:
         fetched.append(url)
         return httpx.Response(
             302,
@@ -187,7 +187,7 @@ def test_kb_read_follows_same_host_redirect(monkeypatch):
     _set_kiwix(monkeypatch)
     fetched: list[str] = []
 
-    async def fetch(url: str) -> httpx.Response:
+    async def fetch(url: str, *, client=None) -> httpx.Response:
         fetched.append(url)
         if len(fetched) == 1:
             return httpx.Response(
@@ -210,7 +210,7 @@ def test_kb_read_follows_same_host_redirect(monkeypatch):
 def test_kb_read_gives_up_on_redirect_loop(monkeypatch):
     _set_kiwix(monkeypatch)
 
-    async def fetch(url: str) -> httpx.Response:
+    async def fetch(url: str, *, client=None) -> httpx.Response:
         return httpx.Response(
             302,
             headers={"location": url},

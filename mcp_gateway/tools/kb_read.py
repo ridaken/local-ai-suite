@@ -182,14 +182,20 @@ def best_excerpt(text: str, query: str, size: int) -> str:
     return ("…" if start > 0 else "") + excerpt + ("…" if end < len(text) else "")
 
 
-async def article_excerpt(source: str, query: str, size: int) -> str | None:
+async def article_excerpt(
+    source: str, query: str, size: int, *, client: httpx.AsyncClient | None = None
+) -> str | None:
     """Fetch a kb_search hit's article and return a query-relevant excerpt, or
-    None if it can't be fetched (caller falls back to the kiwix snippet)."""
+    None if it can't be fetched (caller falls back to the kiwix snippet).
+
+    `client` lets a caller fanning out over several hits reuse one connection
+    pool instead of standing up a fresh TCP/TLS connection per article.
+    """
     url = content_url(source)
     if url is None:
         return None
     try:
-        resp = await _fetch_article(url)
+        resp = await _fetch_article(url, client=client)
     except (httpx.HTTPError, ForeignRedirectError):
         return None
     if resp.status_code != 200:
@@ -210,19 +216,22 @@ _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
 
 
-async def _fetch_html(url: str) -> httpx.Response:
+async def _fetch_html(url: str, *, client: httpx.AsyncClient | None = None) -> httpx.Response:
     """One request, no automatic redirects — redirect policy lives in
     _fetch_article so every hop is host-validated."""
-    async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=False) as client:
-        return await client.get(url, headers={"User-Agent": config.USER_AGENT})
+    headers = {"User-Agent": config.USER_AGENT}
+    if client is not None:
+        return await client.get(url, headers=headers, follow_redirects=False)
+    async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=False) as owned:
+        return await owned.get(url, headers=headers)
 
 
-async def _fetch_article(url: str) -> httpx.Response:
+async def _fetch_article(url: str, *, client: httpx.AsyncClient | None = None) -> httpx.Response:
     """Fetch with manual redirect following, re-validating the host at every
     hop. httpx's automatic following would happily leave the kiwix host on a
     Location header, silently defeating content_url's validation."""
     for _ in range(_MAX_REDIRECTS + 1):
-        resp = await _fetch_html(url)
+        resp = await _fetch_html(url, client=client)
         if resp.status_code not in _REDIRECT_CODES:
             return resp
         target = urljoin(url, resp.headers.get("location", ""))

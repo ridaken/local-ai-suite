@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
+
 from retrieval.hybrid import Candidate, hybrid_search
 
 from .. import config
@@ -29,14 +31,27 @@ _KB_EXCERPT_CHARS = 500
 async def _enrich_kb_excerpts(query: str, candidates: list[Candidate]) -> None:
     """Replace kiwix's match-snippet with a fetched, query-relevant excerpt for
     each kiwix hit. Best-effort: any hit whose article can't be fetched keeps
-    its original snippet."""
+    its original snippet.
+
+    The fan-out is bounded and shares one connection pool: unbounded gather over
+    every hit would open a connection per result and let one slow search saturate
+    kiwix-serve.
+    """
     kb = [c for c in candidates if c.source == "kb" and c.citation]
     if not kb:
         return
-    excerpts = await asyncio.gather(
-        *(article_excerpt(c.citation, query, _KB_EXCERPT_CHARS) for c in kb),
-        return_exceptions=True,
-    )
+    semaphore = asyncio.Semaphore(config.KB_EXCERPT_CONCURRENCY)
+
+    async def fetch(candidate: Candidate, client: httpx.AsyncClient) -> str | None:
+        async with semaphore:
+            return await article_excerpt(
+                candidate.citation, query, _KB_EXCERPT_CHARS, client=client
+            )
+
+    async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=False) as client:
+        excerpts = await asyncio.gather(
+            *(fetch(c, client) for c in kb), return_exceptions=True
+        )
     for candidate, excerpt in zip(kb, excerpts, strict=True):
         if isinstance(excerpt, str) and excerpt:
             candidate.text = excerpt
