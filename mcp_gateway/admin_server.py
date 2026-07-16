@@ -21,7 +21,9 @@ def build_app() -> Starlette:
             zim_library.refresh_library(Path(config.ZIM_DIR), Path(config.LIBRARY_XML_PATH))
 
     refresh_library()
-    manager = DownloadManager(config.ZIM_DIR or ".", on_complete=refresh_library)
+    manager = DownloadManager(
+        config.ZIM_DIR or ".", state_db=config.SETTINGS_DB, on_complete=refresh_library
+    )
     return build_admin_app(
         settings=settings,
         download_manager=manager,

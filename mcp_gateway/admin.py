@@ -12,6 +12,7 @@ ZIM_DIR.
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import html
 import shutil
@@ -474,7 +475,7 @@ def build_admin_app(
         if query or lang:
             try:
                 entries = await catalog_client.search_catalog(query=query, lang=lang, count=30)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, ValueError) as exc:
                 results_html = f'<p class="error">Catalog unreachable ({type(exc).__name__}).</p>'
                 entries = []
             rows = []
@@ -602,18 +603,30 @@ def build_admin_app(
         in_flight = any(j.status in ("queued", "downloading") for j in jobs)
         refresh = '<meta http-equiv="refresh" content="4">' if in_flight else ""
         rows = []
-        for j in sorted(jobs, key=lambda j: j.job_id, reverse=True):
+        for j in jobs:
             pct = ""
             if j.total_bytes:
                 pct = f" ({j.downloaded_bytes / j.total_bytes * 100:.0f}%)"
             total_part = f" / {_human_bytes(j.total_bytes)}" if j.total_bytes else ""
             progress = f"{_human_bytes(j.downloaded_bytes)}{total_part}{pct}"
             note = f'<br><span class="error">{html.escape(j.error)}</span>' if j.error else ""
+            actions = []
+            if j.status in ("queued", "downloading"):
+                actions.append(_job_action(request, j.job_id, "cancel", "Cancel"))
+            if (
+                j.status in ("paused", "cancelled", "error")
+                and 0 < j.downloaded_bytes < j.expected_bytes
+            ):
+                actions.append(_job_action(request, j.job_id, "resume", "Resume"))
+            if j.status in ("paused", "cancelled", "error"):
+                actions.append(_job_action(request, j.job_id, "retry", "Retry from start"))
+                actions.append(_job_action(request, j.job_id, "remove", "Remove"))
             rows.append(
                 f"<tr><td>{html.escape(j.filename)}</td>"
-                f"<td>{_badge(j.status)}</td><td>{progress}{note}</td></tr>"
+                f"<td>{_badge(j.status)}</td><td>{progress}{note}</td>"
+                f"<td>{' '.join(actions)}</td></tr>"
             )
-        header = "<tr><th>File</th><th>Status</th><th>Progress</th></tr>"
+        header = "<tr><th>File</th><th>Status</th><th>Progress</th><th>Actions</th></tr>"
         table = (
             f"<table>{header}{''.join(rows)}</table>"
             if rows
@@ -621,6 +634,40 @@ def build_admin_app(
         )
         body = f"<h2>Downloads</h2>{error_notice}{table}"
         return _render(request, "Downloads", body, extra_head=refresh)
+
+    def _job_action(request: Request, job_id: str, operation: str, label: str) -> str:
+        return (
+            f'<form class="inline" method="post" action="/downloads/{operation}">'
+            f"{_csrf_input(request)}"
+            f'<input type="hidden" name="job_id" value="{html.escape(job_id)}">'
+            f'<button type="submit">{html.escape(label)}</button></form>'
+        )
+
+    async def _download_operation(request: Request, operation: str) -> Response:
+        form, error = await _mutation_form(request)
+        if error:
+            return error
+        assert form is not None
+        try:
+            job_id = str(form.get("job_id", ""))
+            getattr(download_manager, operation)(job_id)
+        except (ValueError, AttributeError):
+            return RedirectResponse(
+                "/downloads?error=Download%20request%20was%20rejected", status_code=303
+            )
+        return RedirectResponse("/downloads", status_code=303)
+
+    async def downloads_resume(request: Request) -> Response:
+        return await _download_operation(request, "resume")
+
+    async def downloads_cancel(request: Request) -> Response:
+        return await _download_operation(request, "cancel")
+
+    async def downloads_retry(request: Request) -> Response:
+        return await _download_operation(request, "retry")
+
+    async def downloads_remove(request: Request) -> Response:
+        return await _download_operation(request, "remove")
 
     async def settings_page(request: Request) -> HTMLResponse:
         mode = settings.get_retrieval_mode()
@@ -711,6 +758,13 @@ def build_admin_app(
     async def healthz(_request: Request) -> Response:
         return PlainTextResponse("ok")
 
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette):
+        try:
+            yield
+        finally:
+            await download_manager.shutdown()
+
     app = Starlette(
         routes=[
             Route("/login", login, methods=["GET", "POST"]),
@@ -725,10 +779,15 @@ def build_admin_app(
             Route("/recommendations", recommendations_page),
             Route("/catalog", catalog_page),
             Route("/downloads", downloads_page),
+            Route("/downloads/resume", downloads_resume, methods=["POST"]),
+            Route("/downloads/cancel", downloads_cancel, methods=["POST"]),
+            Route("/downloads/retry", downloads_retry, methods=["POST"]),
+            Route("/downloads/remove", downloads_remove, methods=["POST"]),
             Route("/settings", settings_page),
             Route("/settings/update", settings_update, methods=["POST"]),
             Route("/configuration", configuration_page),
-        ]
+        ],
+        lifespan=lifespan,
     )
     app.add_middleware(AdminAuthMiddleware, security=security)
     app.add_middleware(SecurityHeadersMiddleware)

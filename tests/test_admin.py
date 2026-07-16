@@ -7,7 +7,7 @@ from starlette.testclient import TestClient
 
 from mcp_gateway import admin
 from mcp_gateway.catalog import CatalogEntry
-from mcp_gateway.downloads import DownloadManager
+from mcp_gateway.downloads import DownloadJob, DownloadManager
 from mcp_gateway.recommendations import Recommendation, ResolvedRecommendation
 from mcp_gateway.settings_store import SettingsStore
 from mcp_gateway.zim_library import BookInfo
@@ -358,6 +358,46 @@ def test_sources_download_registers_a_signed_job(tmp_path):
     assert len(jobs) == 1
     assert jobs[0].filename == "foo.zim"
     assert jobs[0].url == "https://download.kiwix.org/foo.zim"
+
+
+def test_download_page_exposes_and_dispatches_durable_job_actions(tmp_path):
+    calls = []
+    job = DownloadJob(
+        job_id="job1",
+        url="https://download.kiwix.org/foo.zim",
+        filename="foo.zim",
+        dest_path=tmp_path / "zim" / "foo.zim",
+        staging_path=tmp_path / "zim" / ".staging" / "foo.part",
+        expected_bytes=4,
+        downloaded_bytes=2,
+        total_bytes=4,
+        status="paused",
+    )
+
+    class FakeManager:
+        def list_jobs(self):
+            return [job]
+
+        def resume(self, job_id):
+            calls.append(("resume", job_id))
+
+        async def shutdown(self):
+            return None
+
+    client, _settings, _manager, _zim_dir = _client(
+        tmp_path, download_manager=FakeManager()
+    )
+
+    page = client.get("/downloads")
+    assert "Resume" in page.text
+    assert "Retry from start" in page.text
+    assert "Remove" in page.text
+
+    response = client.post(
+        "/downloads/resume", data={"job_id": "job1"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert calls == [("resume", "job1")]
 
 
 def test_sources_download_rejects_unsigned_fields(tmp_path):

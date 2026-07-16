@@ -13,6 +13,7 @@ import asyncio
 from retrieval.hybrid import Candidate, hybrid_search
 
 from .. import config
+from ..limits import ToolInputError, clamp_limit, error_text, validate_query
 from .kb_read import article_excerpt
 
 # Kiwix hits are shown as a preview — kb_read pulls the full article. Curated
@@ -69,7 +70,11 @@ def _format(query: str, candidates: list[Candidate], warning: str | None = None)
 async def kb_search(query: str, limit: int | None = None) -> str:
     """Search the knowledge base (offline docs + your curated corpora) and return
     cited passages."""
-    limit = limit or config.KB_SEARCH_LIMIT
+    try:
+        query = validate_query(query)
+        limit = clamp_limit(limit, config.KB_SEARCH_LIMIT)
+    except ToolInputError as exc:
+        return error_text("kb_search", exc)
     result = await hybrid_search(query, limit)
     if not result.candidates:
         if result.error:

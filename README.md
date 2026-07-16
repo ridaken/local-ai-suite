@@ -1,9 +1,10 @@
 # local-ai-suite
 
 local-ai-suite is a local-first MCP server for offline Kiwix search, hybrid
-Qdrant retrieval, web and research tools, and basic utility tools. Version 0.2
-splits the MCP data plane from the administrator control plane and fails closed
-when hosted credentials or state are missing.
+Qdrant retrieval, web and research tools, and bounded utility tools. Version 0.2
+splits the MCP data plane from the administrator control plane, fails closed
+when hosted credentials or state are missing, and keeps download work durable
+across restarts.
 
 ## v0.2 security boundary
 
@@ -146,6 +147,36 @@ then enforces all of the following:
 Operational errors shown in the UI are sanitized and omit internal URLs and
 low-level exception details.
 
+### Durable download operations
+
+Download jobs are stored in the state database with their expected and received
+sizes, server validators, timestamps, status, and job-specific staging path.
+Stopping or restarting the admin service changes interrupted work to `paused`;
+the Downloads page then offers Resume, Retry from start, Cancel, and Remove as
+appropriate.
+
+A resume sends `Range` and `If-Range` using the saved ETag or Last-Modified
+validator. The worker accepts only an exact `206 Content-Range` beginning at the
+staged file size and agreeing with the catalog total. A changed validator or
+mismatched range leaves the partial file unmodified so the operator can retry
+from the beginning. Graceful admin shutdown cancels and awaits workers after
+persisting them as paused. Completed history is retained according to
+`DOWNLOAD_HISTORY_RETENTION` (default 100).
+
+## Resource boundaries
+
+All public search result limits clamp to `1..20`; retrieval candidate settings
+are restricted to `1..100`; article windows are restricted to `500..16000`
+characters; and article offsets must be nonnegative and bounded. Blank or
+oversized queries are rejected before any upstream request. JSON, XML, and HTML
+responses are size-checked before parsing and malformed payloads return stable
+tool errors instead of escaping through the MCP transport.
+
+Each public tool has an independent concurrency limit. Waiting calls do not
+start more upstream I/O. `calculate` additionally limits expressions to 4 KiB,
+128 AST nodes, bounded nesting, operands, estimated result bits, function arity,
+execution time, and formatted output size.
+
 ## Development and verification
 
 Create a virtual environment, install runtime and development dependencies, and
@@ -159,8 +190,10 @@ docker compose config
 ```
 
 The tests cover credential validation, MCP bearer authentication, admin sessions
-and CSRF, signed action tamper/replay/expiry, downloader SSRF and integrity
-checks, read-only state access, migration safety, and Compose trust boundaries.
+and CSRF, signed action tamper/replay/expiry, downloader SSRF and integrity,
+restart/resume/cancel/retry/shutdown behavior, bounded tool inputs and
+calculation, malformed upstream responses, read-only state access, migration
+safety, and Compose trust boundaries.
 
 ## Configuration reference
 
@@ -176,11 +209,11 @@ Important paths:
 - `STATE_DB`: incremental ingest manifest;
 - `QDRANT_STORAGE`: vector database storage.
 
-## Known v0.2 limitations
+## Next phases
 
-Phase 2 work remains for durable download job persistence/resume, broader
-container CPU and memory limits, image and dependency digest pinning, audit-log
-retention, multi-user administration, automated certificate management, and
-more extensive observability. The v0.2 safeguards intentionally cover the
-minimum required to close the Phase 1 security boundary without expanding into
-those operational features.
+Phase 3 focuses on structured MCP responses, concurrent/RRF hybrid retrieval,
+recoverable ingest, and a versioned retrieval evaluation harness. Phase 4 then
+adds reproducible dependency/image pinning, non-root/read-only containers,
+structured logs and metrics, migration backups, stronger CI/release gates, and
+broader service lifecycle work. Multi-user administration and automated TLS
+remain deployment features beyond this single-workstation v0.2 scope.

@@ -18,11 +18,17 @@ _CONFIG_ENV = Path(__file__).resolve().parent.parent / "config" / ".env"
 load_dotenv(_CONFIG_ENV, override=False)
 
 
-def _int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, "").strip() or default)
-    except ValueError:
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
         return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
 
 
 def _secret(name: str) -> str:
@@ -66,11 +72,16 @@ NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 ARXIV_API_URL = os.environ.get("ARXIV_API_URL", "https://export.arxiv.org/api/query").strip()
 
 # Defaults
-KB_SEARCH_LIMIT = _int("KB_SEARCH_LIMIT", 5)
-WEB_SEARCH_LIMIT = _int("WEB_SEARCH_LIMIT", 5)
+KB_SEARCH_LIMIT = _bounded_int("KB_SEARCH_LIMIT", 5, 1, 20)
+WEB_SEARCH_LIMIT = _bounded_int("WEB_SEARCH_LIMIT", 5, 1, 20)
 # kb_read returns article text in windows of this many characters; the model
 # pages through with the offset parameter.
-KB_READ_WINDOW_CHARS = _int("KB_READ_WINDOW_CHARS", 4000)
+KB_READ_WINDOW_CHARS = _bounded_int("KB_READ_WINDOW_CHARS", 4000, 500, 16000)
+QUERY_MAX_CHARS = _bounded_int("QUERY_MAX_CHARS", 4096, 128, 16384)
+ARTICLE_MAX_OFFSET = _bounded_int("ARTICLE_MAX_OFFSET", 100_000_000, 10_000, 1_000_000_000)
+UPSTREAM_RESPONSE_MAX_BYTES = _bounded_int(
+    "UPSTREAM_RESPONSE_MAX_BYTES", 8 * 1024 * 1024, 64 * 1024, 64 * 1024 * 1024
+)
 # When true, kb_search fetches each top kiwix hit's article and returns a
 # query-relevant excerpt instead of kiwix's own match-snippet (which often lands
 # on a shared navbox/infobox and carries no real content). Costs one local fetch
@@ -98,19 +109,19 @@ QDRANT_STORAGE = os.environ.get("QDRANT_STORAGE", "").strip()
 # Blank EMBED_URL also disables the vector tier.
 EMBED_URL = os.environ.get("EMBED_URL", "http://localhost:8081/v1/embeddings").strip()
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "bge-m3").strip()
-EMBED_DIM = _int("EMBED_DIM", 1024)  # bge-m3 = 1024
+EMBED_DIM = _bounded_int("EMBED_DIM", 1024, 1, 65536)  # bge-m3 = 1024
 RERANK_URL = os.environ.get("RERANK_URL", "http://localhost:8082/v1/rerank").strip()
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "bge-reranker-v2-m3").strip()
 
 # Retrieval sizing: how many candidates each source contributes before reranking,
 # and how many survive to the answer.
-HYBRID_VECTOR_CANDIDATES = _int("HYBRID_VECTOR_CANDIDATES", 20)
-HYBRID_KIWIX_CANDIDATES = _int("HYBRID_KIWIX_CANDIDATES", 20)
+HYBRID_VECTOR_CANDIDATES = _bounded_int("HYBRID_VECTOR_CANDIDATES", 20, 1, 100)
+HYBRID_KIWIX_CANDIDATES = _bounded_int("HYBRID_KIWIX_CANDIDATES", 20, 1, 100)
 
 # Ingest / chunking. Sizes are in characters (~4 chars per token) to avoid a
 # tokenizer dependency; STATE_DB is the incremental manifest.
-CHUNK_MAX_CHARS = _int("CHUNK_MAX_CHARS", 2000)
-CHUNK_OVERLAP_CHARS = _int("CHUNK_OVERLAP_CHARS", 200)
+CHUNK_MAX_CHARS = _bounded_int("CHUNK_MAX_CHARS", 2000, 256, 16000)
+CHUNK_OVERLAP_CHARS = _bounded_int("CHUNK_OVERLAP_CHARS", 200, 0, 15999)
 STATE_DB = os.environ.get(
     "STATE_DB", str(Path(__file__).resolve().parent.parent / "ingest" / "state.db")
 ).strip()
@@ -154,11 +165,11 @@ LIBRARY_XML_PATH = os.environ.get("LIBRARY_XML_PATH", "").strip() or (
 )
 
 # Admin UI + MCP-over-HTTP bind address. Loopback by default — LAN exposure is
-# an explicit opt-in, not the default, since the admin UI has no auth of its own.
+# an explicit opt-in; authentication does not change the single-workstation model.
 ADMIN_HOST = os.environ.get("ADMIN_HOST", "127.0.0.1").strip()
-ADMIN_PORT = _int("ADMIN_PORT", 8091)
+ADMIN_PORT = _bounded_int("ADMIN_PORT", 8091, 1, 65535)
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1").strip()
-MCP_PORT = _int("MCP_PORT", 8090)
+MCP_PORT = _bounded_int("MCP_PORT", 8090, 1, 65535)
 
 # HTTP credentials. Stdio does not require MCP_API_KEY.
 ADMIN_TOKEN = _secret("ADMIN_TOKEN")
@@ -183,9 +194,23 @@ ADMIN_ALLOWED_ORIGINS = [
 ]
 
 # Downloads are intentionally restricted to official Kiwix distribution hosts.
-DOWNLOAD_MAX_BYTES = _int("DOWNLOAD_MAX_BYTES", 200 * 1024**3)
-DOWNLOAD_MIN_FREE_BYTES = _int("DOWNLOAD_MIN_FREE_BYTES", 2 * 1024**3)
-DOWNLOAD_MAX_CONCURRENCY = _int("DOWNLOAD_MAX_CONCURRENCY", 1)
+DOWNLOAD_MAX_BYTES = _bounded_int(
+    "DOWNLOAD_MAX_BYTES", 200 * 1024**3, 1, 1024 * 1024**3
+)
+DOWNLOAD_MIN_FREE_BYTES = _bounded_int(
+    "DOWNLOAD_MIN_FREE_BYTES", 2 * 1024**3, 0, 1024 * 1024**3
+)
+DOWNLOAD_MAX_CONCURRENCY = _bounded_int("DOWNLOAD_MAX_CONCURRENCY", 1, 1, 8)
+DOWNLOAD_HISTORY_RETENTION = _bounded_int("DOWNLOAD_HISTORY_RETENTION", 100, 0, 1000)
+
+# Per-tool in-flight work is bounded independently so one slow upstream cannot
+# consume every request task. Waiting callers do not start additional upstream I/O.
+KB_SEARCH_CONCURRENCY = _bounded_int("KB_SEARCH_CONCURRENCY", 4, 1, 32)
+KB_READ_CONCURRENCY = _bounded_int("KB_READ_CONCURRENCY", 8, 1, 64)
+WEB_SEARCH_CONCURRENCY = _bounded_int("WEB_SEARCH_CONCURRENCY", 4, 1, 32)
+PUBMED_SEARCH_CONCURRENCY = _bounded_int("PUBMED_SEARCH_CONCURRENCY", 4, 1, 32)
+ARXIV_SEARCH_CONCURRENCY = _bounded_int("ARXIV_SEARCH_CONCURRENCY", 4, 1, 32)
+CALCULATE_CONCURRENCY = _bounded_int("CALCULATE_CONCURRENCY", 8, 1, 64)
 DOWNLOAD_ALLOWED_HOSTS = [
     value.strip().lower()
     for value in os.environ.get(
@@ -358,6 +383,16 @@ CONFIG_FIELD_NAMES = tuple(field["name"] for field in CONFIG_FIELDS)
 INT_CONFIG_FIELDS = {
     field["name"] for field in CONFIG_FIELDS if field.get("type") == "int"
 }
+INT_CONFIG_RANGES = {
+    "KB_SEARCH_LIMIT": (1, 20),
+    "WEB_SEARCH_LIMIT": (1, 20),
+    "EMBED_DIM": (1, 65536),
+    "HYBRID_VECTOR_CANDIDATES": (1, 100),
+    "HYBRID_KIWIX_CANDIDATES": (1, 100),
+    "CHUNK_MAX_CHARS": (256, 16000),
+    "CHUNK_OVERLAP_CHARS": (0, 15999),
+    "ADMIN_PORT": (1, 65535),
+}
 RESTART_CONFIG_FIELDS = {
     field["name"] for field in CONFIG_FIELDS if field.get("restart")
 }
@@ -382,6 +417,9 @@ def apply_runtime_overrides(values: dict[str, str]) -> list[str]:
             try:
                 value = int(value)
             except ValueError:
+                continue
+            bounds = INT_CONFIG_RANGES.get(name)
+            if bounds and not bounds[0] <= value <= bounds[1]:
                 continue
         globals()[name] = value
         if name in RESTART_CONFIG_FIELDS:
@@ -419,3 +457,8 @@ def validate_http_security(*, admin: bool = False, mcp: bool = False, mcpo: bool
         raise ValueError("ADMIN_TOKEN, MCP_API_KEY, and MCPO_API_KEY must be distinct")
     if "*" in MCP_ALLOWED_HOSTS:
         raise ValueError("MCP_ALLOWED_HOSTS may not contain '*' in hosted mode")
+
+
+def validate_runtime_limits() -> None:
+    if CHUNK_OVERLAP_CHARS >= CHUNK_MAX_CHARS:
+        raise ValueError("CHUNK_OVERLAP_CHARS must be smaller than CHUNK_MAX_CHARS")
