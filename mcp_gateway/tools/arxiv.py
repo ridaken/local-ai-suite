@@ -20,6 +20,13 @@ from ..limits import (
     response_bytes,
     validate_query,
 )
+from ..schemas import (
+    SOURCE_ARXIV,
+    SearchResponse,
+    SearchResult,
+    render_search,
+    search_error,
+)
 
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _WS_RE = re.compile(r"\s+")
@@ -31,13 +38,13 @@ def _clean(text: str | None) -> str:
     return _WS_RE.sub(" ", text).strip()
 
 
-async def arxiv_search(query: str, limit: int = 5) -> str:
+async def arxiv_search_response(query: str, limit: int = 5) -> SearchResponse:
     """Search arXiv and return cited preprint summaries."""
     try:
         query = validate_query(query)
         limit = clamp_limit(limit, 5)
     except ToolInputError as exc:
-        return error_text("arxiv_search", exc)
+        return search_error(str(query), exc.code, error_text("arxiv_search", exc))
     try:
         async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True) as client:
             resp = await client.get(
@@ -52,39 +59,53 @@ async def arxiv_search(query: str, limit: int = 5) -> str:
             )
             resp.raise_for_status()
     except httpx.HTTPError:
-        return "arxiv_search error [upstream_unavailable]: arXiv request failed."
+        return search_error(
+            query,
+            "upstream_unavailable",
+            "arxiv_search error [upstream_unavailable]: arXiv request failed.",
+        )
 
     try:
         root = ET.fromstring(response_bytes(resp))
     except UpstreamResponseError as exc:
-        return error_text("arxiv_search", exc)
+        return search_error(query, exc.code, error_text("arxiv_search", exc))
     except ET.ParseError:
-        return "arxiv_search error [upstream_malformed]: arXiv returned malformed XML."
+        return search_error(
+            query,
+            "upstream_malformed",
+            "arxiv_search error [upstream_malformed]: arXiv returned malformed XML.",
+        )
 
-    entries = root.findall(f"{_ATOM}entry")
-    if not entries:
-        return f'No arXiv results for "{query}".'
-
-    lines = [f'arXiv results for "{query}":', ""]
-    for i, entry in enumerate(entries, start=1):
-        title = _clean(entry.findtext(f"{_ATOM}title")) or "(untitled)"
+    results = []
+    for entry in root.findall(f"{_ATOM}entry"):
         url = _clean(entry.findtext(f"{_ATOM}id"))
         published = _clean(entry.findtext(f"{_ATOM}published"))[:10]
-        authors = [
-            _clean(a.findtext(f"{_ATOM}name"))
-            for a in entry.findall(f"{_ATOM}author")
-        ]
+        authors = [_clean(a.findtext(f"{_ATOM}name")) for a in entry.findall(f"{_ATOM}author")]
         byline = authors[0] + (" et al." if len(authors) > 1 else "") if authors else ""
         summary = _clean(entry.findtext(f"{_ATOM}summary"))
         if len(summary) > 300:
             summary = summary[:297] + "..."
-        lines.append(f"{i}. {title}")
         meta = ", ".join(x for x in [byline, published] if x)
-        if meta:
-            lines.append(f"   {meta}")
-        if summary:
-            lines.append(f"   {summary}")
-        lines.append(f"   source: {url}")
-        lines.append("")
-    lines.append("These are arXiv preprints; cite the URLs above.")
-    return "\n".join(lines).rstrip()
+        results.append(
+            SearchResult(
+                id=f"arxiv:{url}" if url else "",
+                title=_clean(entry.findtext(f"{_ATOM}title")) or "(untitled)",
+                excerpt="\n   ".join(x for x in [meta, summary] if x),
+                source_kind=SOURCE_ARXIV,
+                citation=url,
+            )
+        )
+    return SearchResponse(query=query, results=results)
+
+
+def render(response: SearchResponse) -> str:
+    return render_search(
+        response,
+        heading="arXiv results",
+        footer="These are arXiv preprints; cite the URLs above.",
+    )
+
+
+async def arxiv_search(query: str, limit: int = 5) -> str:
+    """Text-only entry point (stdio clients and tests)."""
+    return render(await arxiv_search_response(query, limit))

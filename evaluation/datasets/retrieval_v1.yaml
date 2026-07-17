@@ -1,0 +1,55 @@
+# Retrieval evaluation dataset.
+#
+# Each case is a query plus the citations retrieval should return for it, and
+# the text an answer-bearing passage must contain. Keep cases specific: a query
+# whose expected source is "whatever Wikipedia says about X" cannot regress and
+# therefore measures nothing.
+#
+# expected_sources must be citations exactly as retrieval emits them:
+#   curated vectors -> "<label>/<path>:<line>"  (e.g. local-ai-suite/retrieval/hybrid.py:77)
+#   kiwix articles  -> the full article URL
+#
+# This ships seeded against this repo's own curated source (ingest/sources.yaml
+# indexes local-ai-suite), so `python -m ingest.ingest` then
+# `python -m evaluation.run_eval` works on a fresh checkout with no ZIM.
+#
+# Bump `version` only when the case schema changes; add cases freely without it.
+version: 1
+name: local-ai-suite-retrieval
+
+cases:
+  - id: hybrid-rrf-fusion
+    query: how are lexical and vector results fused together
+    expected_sources:
+      - local-ai-suite/retrieval/hybrid.py:1
+    answer_passages:
+      - reciprocal-rank fusion
+    notes: The fusion strategy is documented in the hybrid module docstring.
+
+  - id: chunk-size-cap
+    query: how is the maximum chunk size enforced during ingest
+    expected_sources:
+      - local-ai-suite/ingest/chunking.py:1
+    answer_passages:
+      - CHUNK_MAX_CHARS
+
+  - id: ingest-crash-safety
+    query: what happens if ingest is interrupted halfway through
+    expected_sources:
+      - local-ai-suite/ingest/ingest.py:1
+    answer_passages:
+      - upserted before stale
+
+  - id: kb-read-host-restriction
+    query: can kb_read fetch an arbitrary url
+    expected_sources:
+      - local-ai-suite/mcp_gateway/tools/kb_read.py:1
+    answer_passages:
+      - kiwix host
+
+  - id: download-host-allowlist
+    query: which hosts are downloads allowed from
+    expected_sources:
+      - local-ai-suite/mcp_gateway/config.py:1
+    answer_passages:
+      - DOWNLOAD_ALLOWED_HOSTS

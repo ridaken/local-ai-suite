@@ -87,3 +87,89 @@ class Widget:
     assert "@classmethod" not in header.text
     assert method.start_line == 4
     assert method.text.startswith("    @classmethod")
+
+
+# --- Phase 3: hard size cap ---------------------------------------------------
+
+
+def test_long_symbol_is_split_under_the_cap(monkeypatch):
+    """Symbol chunking keeps a definition intact regardless of size, so a huge
+    function would otherwise escape as one oversized chunk the embedder rejects."""
+    monkeypatch.setattr(config, "CHUNK_MAX_CHARS", 300)
+    body = "\n".join(f"    value_{i} = {i}" for i in range(200))
+    chunks = chunk_file("big.py", f"def enormous():\n{body}\n")
+
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 300 for c in chunks)
+    assert all("enormous" in c.symbol for c in chunks)
+    assert len({c.chunk_id for c in chunks}) == len(chunks)
+
+
+def test_single_long_line_is_hard_split(monkeypatch):
+    """A minified file has no line boundary to split on; the cap still holds."""
+    monkeypatch.setattr(config, "CHUNK_MAX_CHARS", 256)
+    chunks = chunk_file("bundle.js", "a" * 5000 + "\n")
+
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 256 for c in chunks)
+    assert "".join(c.text for c in chunks) == "a" * 5000
+
+
+def test_generic_window_chunks_respect_the_cap(monkeypatch):
+    monkeypatch.setattr(config, "CHUNK_MAX_CHARS", 400)
+    monkeypatch.setattr(config, "CHUNK_OVERLAP_CHARS", 50)
+    text = "\n".join(f"line {i} " + "z" * 100 for i in range(100))
+    assert all(len(c.text) <= 400 for c in chunk_file("notes.txt", text))
+
+
+# --- Phase 3: markdown chunking -----------------------------------------------
+
+MD = """\
+intro paragraph
+
+# Install
+
+run the installer
+
+## Options
+
+- verbose
+- quiet
+
+# Usage
+
+call the thing
+"""
+
+
+def test_markdown_chunks_by_heading():
+    chunks = chunk_file("README.md", MD)
+    assert [c.symbol for c in chunks] == ["<preamble>", "Install", "Options", "Usage"]
+    assert all(c.language == "markdown" for c in chunks)
+
+
+def test_markdown_section_keeps_its_heading_with_its_body():
+    chunks = {c.symbol: c.text for c in chunk_file("README.md", MD)}
+    assert chunks["Install"].startswith("# Install")
+    assert "run the installer" in chunks["Install"]
+
+
+def test_markdown_ignores_headings_inside_code_fences():
+    """A '#' comment in a shell block is not a heading — splitting there would
+    cut the fence in half and strand the closing ```."""
+    text = "# Real\n\n```sh\n# not a heading\necho hi\n```\n\n# Also Real\n\nbody\n"
+    chunks = chunk_file("guide.md", text)
+    assert [c.symbol for c in chunks] == ["Real", "Also Real"]
+    assert "echo hi" in chunks[0].text
+    assert chunks[0].text.count("```") == 2
+
+
+def test_markdown_without_headings_falls_back_to_windows():
+    chunks = chunk_file("plain.md", "just prose, no headings at all\n")
+    assert [c.symbol for c in chunks] == ["lines 1-1"]
+
+
+def test_markdown_line_ranges_are_reported():
+    chunks = {c.symbol: (c.start_line, c.end_line) for c in chunk_file("README.md", MD)}
+    assert chunks["Install"][0] == 3
+    assert chunks["Usage"][0] == 12

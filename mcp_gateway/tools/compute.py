@@ -7,6 +7,8 @@ import asyncio
 import math
 import operator
 
+from ..schemas import CalculationResponse, ToolError, render_calculation
+
 _MAX_EXPRESSION_CHARS = 4096
 _MAX_AST_NODES = 128
 _MAX_AST_DEPTH = 32
@@ -188,18 +190,31 @@ def _calculate_sync(expression: str) -> str:
     return output
 
 
-async def calculate(expression: str) -> str:
+def _error(expression: str, code: str, message: str) -> CalculationResponse:
+    return CalculationResponse(
+        expression=expression if isinstance(expression, str) else "",
+        error=ToolError(code=code, message=f"calculate error: {message}"),
+    )
+
+
+async def calculate_response(expression: str) -> CalculationResponse:
     """Evaluate a bounded math expression and return the result."""
     try:
         async with asyncio.timeout(_CALC_TIMEOUT_SECONDS):
-            return await asyncio.to_thread(_calculate_sync, expression)
+            rendered = await asyncio.to_thread(_calculate_sync, expression)
+        return CalculationResponse(expression=expression, result=rendered)
     except TimeoutError:
-        return "calculate error: expression exceeded the execution-time limit"
+        return _error(expression, "calc_timeout", "expression exceeded the execution-time limit")
     except _CalcError as exc:
-        return f"calculate error: {exc}"
+        return _error(expression, "calc_bounds", str(exc))
     except SyntaxError:
-        return "calculate error: could not parse the expression."
+        return _error(expression, "invalid_expression", "could not parse the expression.")
     except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
-        return f"calculate error: {exc}"
+        return _error(expression, "calc_invalid", str(exc))
     except Exception as exc:  # noqa: BLE001 - never leak a tool exception to the transport
-        return f"calculate error: evaluation failed ({type(exc).__name__})"
+        return _error(expression, "calc_failed", f"evaluation failed ({type(exc).__name__})")
+
+
+async def calculate(expression: str) -> str:
+    """Text-only entry point (stdio clients and tests)."""
+    return render_calculation(await calculate_response(expression))

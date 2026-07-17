@@ -19,20 +19,29 @@ from ..limits import (
     response_json,
     validate_query,
 )
+from ..schemas import (
+    SOURCE_WEB,
+    SearchResponse,
+    SearchResult,
+    render_search,
+    search_error,
+)
 
 
-async def web_search(query: str, limit: int | None = None) -> str:
+async def web_search_response(query: str, limit: int | None = None) -> SearchResponse:
     """Search the live web and return cited results."""
     try:
         query = validate_query(query)
         limit = clamp_limit(limit, config.WEB_SEARCH_LIMIT)
     except ToolInputError as exc:
-        return error_text("web_search", exc)
+        return search_error(str(query), exc.code, error_text("web_search", exc))
     if not config.KAGI_API_KEY:
-        return (
+        return search_error(
+            query,
+            "not_configured",
             "web_search is not configured: set KAGI_API_KEY in config/.env "
             "(or wire a SearXNG backend). Falling back to the knowledge base or "
-            "another tool may be appropriate."
+            "another tool may be appropriate.",
         )
 
     try:
@@ -46,10 +55,18 @@ async def web_search(query: str, limit: int | None = None) -> str:
                 },
             )
     except httpx.HTTPError:
-        return "web_search error [upstream_unavailable]: Kagi request failed."
+        return search_error(
+            query,
+            "upstream_unavailable",
+            "web_search error [upstream_unavailable]: Kagi request failed.",
+        )
 
     if resp.status_code != 200:
-        return f"web_search error [upstream_http]: Kagi returned HTTP {resp.status_code}."
+        return search_error(
+            query,
+            "upstream_http",
+            f"web_search error [upstream_http]: Kagi returned HTTP {resp.status_code}.",
+        )
 
     try:
         data = response_json(resp)
@@ -60,26 +77,38 @@ async def web_search(query: str, limit: int | None = None) -> str:
         ):
             raise UpstreamResponseError("upstream_malformed", "Kagi returned an invalid shape")
     except UpstreamResponseError as exc:
-        return error_text("web_search", exc)
+        return search_error(query, exc.code, error_text("web_search", exc))
     # Kagi returns {"data": [{"t":0,"title","url","snippet"}, {"t":1,...}], ...}
     # t==0 is a search result; t==1 is a related-searches block we skip.
-    results = [r for r in data.get("data", []) if r.get("t") == 0]
-    if not results:
-        return f'No web results for "{query}".'
+    hits = [r for r in data.get("data", []) if r.get("t") == 0]
 
-    lines = [f'Web results for "{query}":', ""]
+    results = []
     try:
-        for i, r in enumerate(results[:limit], start=1):
-            title = (r.get("title") or "(untitled)").strip()
+        for r in hits[:limit]:
             url = (r.get("url") or "").strip()
-            snippet = (r.get("snippet") or "").strip()
-            lines.append(f"{i}. {title}")
-            if snippet:
-                lines.append(f"   {snippet}")
-            lines.append(f"   source: {url}")
-            lines.append("")
+            results.append(
+                SearchResult(
+                    id=f"web:{url}" if url else "",
+                    title=(r.get("title") or "(untitled)").strip(),
+                    excerpt=(r.get("snippet") or "").strip(),
+                    source_kind=SOURCE_WEB,
+                    citation=url,
+                )
+            )
     except (AttributeError, TypeError):
         malformed = UpstreamResponseError("upstream_malformed", "Kagi returned invalid results")
-        return error_text("web_search", malformed)
-    lines.append("These are live web results; cite the source URLs above.")
-    return "\n".join(lines).rstrip()
+        return search_error(query, malformed.code, error_text("web_search", malformed))
+    return SearchResponse(query=query, results=results)
+
+
+def render(response: SearchResponse) -> str:
+    return render_search(
+        response,
+        heading="Web results",
+        footer="These are live web results; cite the source URLs above.",
+    )
+
+
+async def web_search(query: str, limit: int | None = None) -> str:
+    """Text-only entry point (stdio clients and tests)."""
+    return render(await web_search_response(query, limit))

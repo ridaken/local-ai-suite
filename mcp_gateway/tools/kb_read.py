@@ -27,6 +27,7 @@ from ..limits import (
     validate_offset,
     validate_source,
 )
+from ..schemas import ReadResponse, read_error, render_read
 
 # Fallback window size when KB_READ_WINDOW_CHARS is set to a non-positive value.
 _DEFAULT_WINDOW = 4000
@@ -182,14 +183,20 @@ def best_excerpt(text: str, query: str, size: int) -> str:
     return ("…" if start > 0 else "") + excerpt + ("…" if end < len(text) else "")
 
 
-async def article_excerpt(source: str, query: str, size: int) -> str | None:
+async def article_excerpt(
+    source: str, query: str, size: int, *, client: httpx.AsyncClient | None = None
+) -> str | None:
     """Fetch a kb_search hit's article and return a query-relevant excerpt, or
-    None if it can't be fetched (caller falls back to the kiwix snippet)."""
+    None if it can't be fetched (caller falls back to the kiwix snippet).
+
+    `client` lets a caller fanning out over several hits reuse one connection
+    pool instead of standing up a fresh TCP/TLS connection per article.
+    """
     url = content_url(source)
     if url is None:
         return None
     try:
-        resp = await _fetch_article(url)
+        resp = await _fetch_article(url, client=client)
     except (httpx.HTTPError, ForeignRedirectError):
         return None
     if resp.status_code != 200:
@@ -210,19 +217,22 @@ _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
 
 
-async def _fetch_html(url: str) -> httpx.Response:
+async def _fetch_html(url: str, *, client: httpx.AsyncClient | None = None) -> httpx.Response:
     """One request, no automatic redirects — redirect policy lives in
     _fetch_article so every hop is host-validated."""
-    async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=False) as client:
-        return await client.get(url, headers={"User-Agent": config.USER_AGENT})
+    headers = {"User-Agent": config.USER_AGENT}
+    if client is not None:
+        return await client.get(url, headers=headers, follow_redirects=False)
+    async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=False) as owned:
+        return await owned.get(url, headers=headers)
 
 
-async def _fetch_article(url: str) -> httpx.Response:
+async def _fetch_article(url: str, *, client: httpx.AsyncClient | None = None) -> httpx.Response:
     """Fetch with manual redirect following, re-validating the host at every
     hop. httpx's automatic following would happily leave the kiwix host on a
     Location header, silently defeating content_url's validation."""
     for _ in range(_MAX_REDIRECTS + 1):
-        resp = await _fetch_html(url)
+        resp = await _fetch_html(url, client=client)
         if resp.status_code not in _REDIRECT_CODES:
             return resp
         target = urljoin(url, resp.headers.get("location", ""))
@@ -232,44 +242,58 @@ async def _fetch_article(url: str) -> httpx.Response:
     raise httpx.TooManyRedirects(f"more than {_MAX_REDIRECTS} redirects", request=resp.request)
 
 
-async def kb_read(source: str, offset: int = 0) -> str:
+async def kb_read_response(source: str, offset: int = 0) -> ReadResponse:
     """Read a knowledge-base article in full, one window at a time."""
     try:
         source = validate_source(source)
         offset = validate_offset(offset)
     except ToolInputError as exc:
-        return error_text("kb_read", exc)
+        return read_error(str(source), exc.code, error_text("kb_read", exc))
     url = content_url(source)
     if url is None:
-        return (
+        return read_error(
+            source,
+            "invalid_source",
             "kb_read error: source must be a knowledge-base URL from a kb_search "
-            f"result (host {config.KIWIX_URL}). Got: {source}"
+            f"result (host {config.KIWIX_URL}). Got: {source}",
         )
 
     try:
         resp = await _fetch_article(url)
     except ForeignRedirectError as exc:
-        return (
+        return read_error(
+            source,
+            "foreign_redirect",
             "kb_read error: the knowledge base redirected outside its own host "
-            f"({exc}) — refusing to follow."
+            f"({exc}) — refusing to follow.",
         )
     except httpx.HTTPError:
-        return "kb_read error [upstream_unavailable]: knowledge-base request failed."
+        return read_error(
+            source,
+            "upstream_unavailable",
+            "kb_read error [upstream_unavailable]: knowledge-base request failed.",
+        )
     if resp.status_code == 404:
-        return (
+        return read_error(
+            source,
+            "not_found",
             f"kb_read error: article not found at {source}. Use a source URL "
-            "exactly as returned by kb_search."
+            "exactly as returned by kb_search.",
         )
     if resp.status_code != 200:
-        return f"kb_read error [upstream_http]: knowledge base returned HTTP {resp.status_code}."
+        return read_error(
+            source,
+            "upstream_http",
+            f"kb_read error [upstream_http]: knowledge base returned HTTP {resp.status_code}.",
+        )
 
     try:
         body = response_bytes(resp).decode(resp.encoding or "utf-8", errors="replace")
     except UpstreamResponseError as exc:
-        return error_text("kb_read", exc)
+        return read_error(source, exc.code, error_text("kb_read", exc))
     title, text = extract_text(body)
     if not text:
-        return f"kb_read: no readable text at {source}."
+        return read_error(source, "empty_document", f"kb_read: no readable text at {source}.")
 
     # A non-positive window would page 0 chars and tell the model to retry at
     # the same offset forever; treat it as misconfiguration and use the default.
@@ -277,17 +301,24 @@ async def kb_read(source: str, offset: int = 0) -> str:
     size = min(16000, max(500, configured_size if configured_size > 0 else _DEFAULT_WINDOW))
     body, start, end, total = window(text, offset, size)
     if start >= total:
-        return (
+        return read_error(
+            source,
+            "offset_past_end",
             f"kb_read: offset {offset} is past the end of this article "
-            f"({total} characters total)."
+            f"({total} characters total).",
         )
 
-    lines = [f'"{title or source}" — characters {start}-{end} of {total}:', "", body, ""]
-    if end < total:
-        lines.append(
-            f"[{total - end} characters remain — call kb_read with offset={end} to continue]"
-        )
-    else:
-        lines.append("[end of article]")
-    lines.append(f"source: {source}")
-    return "\n".join(lines)
+    return ReadResponse(
+        title=title or source,
+        source=source,
+        text=body,
+        offset=start,
+        next_offset=end if end < total else None,
+        total_length=total,
+        end_of_document=end >= total,
+    )
+
+
+async def kb_read(source: str, offset: int = 0) -> str:
+    """Text-only entry point (stdio clients and tests)."""
+    return render_read(await kb_read_response(source, offset))
