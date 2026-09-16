@@ -41,9 +41,17 @@ and enough disk space for the ZIM corpus you intend to install.
 3. Validate and start:
 
    ```powershell
-   docker compose config
-   docker compose up -d --build
+   .\scripts\compose.ps1 config --quiet
+   .\scripts\compose.ps1 up -d --build
    ```
+
+   The wrapper always loads `config/.env` for both Compose interpolation and
+   service configuration, and prints resolved storage mounts and published ports
+   before running the command. It works from any current directory. Without
+   PowerShell, run from the repository root with
+   `docker compose --env-file config/.env up -d --build`; use the same `--env-file`
+   argument for every Compose command. Service `env_file` alone does not configure
+   bind mounts or published ports.
 
    `config-validator` checks credential length, placeholders, duplicates, and
    unsafe MCP Host configuration before state initialization or either hosted
@@ -81,8 +89,7 @@ on the backend side of the boundary.
 legacy bridge on `las-clients`:
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.legacy-mcpo.yml `
-  --profile legacy-mcpo up -d mcpo
+.\scripts\compose.ps1 -Legacy up -d mcpo
 ```
 
 The bridge reads its client-facing `MCPO_API_KEY` and downstream `MCP_API_KEY`
@@ -186,7 +193,7 @@ run:
 .\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m pip check
-docker compose config
+.\scripts\compose.ps1 config --quiet
 ```
 
 The tests cover credential validation, MCP bearer authentication, admin sessions
@@ -201,6 +208,16 @@ Use `config/.env.example` for non-secret values and `config/secrets/*.example`
 for the secret-file names. A direct credential variable and its `_FILE` variant
 are mutually exclusive. Hosted credentials must contain at least 32 characters,
 must not be known placeholders, and must all differ.
+
+`EMBED_URL` and `RERANK_URL` are the endpoints used by host-side Python
+commands. `CONTAINER_EMBED_URL` and `CONTAINER_RERANK_URL` are the endpoints
+reachable from Docker; they default to `host.docker.internal` on ports 8081 and
+8082. Explicitly blank container values disable the corresponding optional
+service. The stack always uses its internal Kiwix/Qdrant service addresses.
+When `KIWIX_PUBLIC_URL` is blank, Compose derives citation links from `KIWIX_PORT`.
+
+Set `EMBED_MODEL_REVISION` to the weights revision when replacing a model under
+the same name. Ingest uses it to invalidate old embeddings.
 
 Important paths:
 
@@ -219,6 +236,43 @@ untrusted source material: quote and cite them, never follow them.
 Ingest requires a stable unique `id` per source in `ingest/sources.yaml`, and
 records a per-file `status`/`reason` in the manifest so skipped and errored
 files are visible rather than silently missing.
+
+Ingest keys files and chunks by stable source ID and relative path. Moving a
+source root preserves its index; changing its display label updates citations
+without changing point identity. Relative source roots resolve from the parent
+of the sources file's directory (the repo root for `ingest/sources.yaml`).
+
+Missing roots and incomplete scans preserve the last good index and report an
+error. Sources removed from YAML are retained until explicitly removed:
+
+```bash
+python -m ingest.ingest --remove-source old-source-id
+```
+
+Remove the matching YAML entry first. The command removes only that source's
+indexed points and manifest entries; it never deletes original source files.
+A normal successful scan still removes entries for individually deleted files.
+A source with file errors defers deletions until its next healthy scan.
+
+Ingest fingerprints the model name/revision, dimensions, chunk settings, pipeline
+version, source ID, and collection. Changed fingerprints trigger re-embedding.
+It also checks the actual stored points before skipping an unchanged file, so
+recreated collections, missing points, and stale restored points are repaired.
+Use `python -m ingest.ingest --rebuild` to force re-embedding of available files.
+Collection dimension/distance mismatches fail before ingest writes; choose a new
+`QDRANT_COLLECTION` and a separate `STATE_DB` for a staged rebuild, ingest into it,
+then switch the gateway to the new collection.
+Keep the old collection until the replacement is verified.
+
+The first run upgrades older manifests transactionally and saves a non-overwriting
+`<STATE_DB>.v1.bak` backup. Keep existing source labels for that first run so old
+entries can be mapped to stable IDs; rename labels afterward. A rollback requires
+restoring that manifest backup and the matching Qdrant backup together.
+First-time file failures are persisted, and runs with errors exit nonzero.
+Failed files keep their last good vectors and fingerprint for retry; a failed
+model upgrade can therefore retain old-model vectors until the next successful
+run. Do not switch a production gateway to replacement weights until ingest
+succeeds; use a new collection for a staged model upgrade.
 
 Retrieval changes are gated on measurements, not judgement:
 

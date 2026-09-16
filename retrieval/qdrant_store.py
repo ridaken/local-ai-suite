@@ -34,6 +34,37 @@ def ensure_collection(client: QdrantClient, name: str, dim: int) -> None:
             collection_name=name,
             vectors_config=models.VectorParams(size=dim, distance=models.Distance.COSINE),
         )
+    else:
+        vectors = client.get_collection(name).config.params.vectors
+        if (
+            not isinstance(vectors, models.VectorParams)
+            or vectors.size != dim
+            or vectors.distance != models.Distance.COSINE
+        ):
+            raise ValueError(
+                "collection vector configuration does not match EMBED_DIM/cosine; "
+                "choose a new QDRANT_COLLECTION and run ingest to rebuild safely"
+            )
+
+
+def chunks_current(
+    client: QdrantClient, name: str, chunk_ids: list[str], fingerprint: str,
+    sha256: str, display_path: str,
+) -> bool:
+    """Reconcile actual points, including a recreated, emptied, or restored collection."""
+    for start in range(0, len(chunk_ids), 128):
+        ids = [point_id(cid) for cid in chunk_ids[start : start + 128]]
+        points = client.retrieve(name, ids=ids, with_payload=True, with_vectors=False)
+        if {str(p.id) for p in points} != set(ids):
+            return False
+        if any(
+            (p.payload or {}).get("pipeline_fingerprint") != fingerprint
+            or (p.payload or {}).get("content_sha256") != sha256
+            or (p.payload or {}).get("path") != display_path
+            for p in points
+        ):
+            return False
+    return True
 
 
 def upsert_chunks(

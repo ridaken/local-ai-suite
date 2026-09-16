@@ -19,28 +19,38 @@ Run:  python -m ingest.ingest
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import fnmatch
 import hashlib
 import json
+import os
 import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
 from mcp_gateway import config
 from retrieval.embed import embed_texts
-from retrieval.qdrant_store import delete_by_chunk_ids, ensure_collection, get_client, upsert_chunks
+from retrieval.qdrant_store import (
+    chunks_current,
+    delete_by_chunk_ids,
+    ensure_collection,
+    get_client,
+    upsert_chunks,
+)
 
 from .chunking import chunk_file
+from .manifest import Entry, Manifest, file_key
 
 EmbedTextsFn = Callable[[list[str]], Awaitable[list[list[float]]]]
 
 _DEFAULT_EXCLUDE_DIRS = {".git", ".venv", "node_modules", "__pycache__"}
 _MAX_FILE_BYTES = 1_000_000
+# Bump when chunking/embedding preprocessing changes, even without a setting change.
+PIPELINE_VERSION = 1
 
 # Manifest statuses.
 STATUS_INDEXED = "indexed"
@@ -75,6 +85,8 @@ def load_sources(sources_path: Path) -> list[Source]:
     other's manifest rows.
     """
     raw = yaml.safe_load(sources_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise SourceConfigError("sources.yaml must be a mapping")
     entries = raw.get("sources", [])
     if not isinstance(entries, list):
         raise SourceConfigError("sources.yaml: 'sources' must be a list")
@@ -96,6 +108,9 @@ def load_sources(sources_path: Path) -> list[Source]:
         if "root" not in entry:
             raise SourceConfigError(f"sources.yaml: source {source_id!r} is missing 'root'")
         root = Path(str(entry["root"])).expanduser()
+        # Preserve documented repo-relative roots, independent of the caller's cwd.
+        if not root.is_absolute():
+            root = sources_path.resolve().parent.parent / root
         label = str(entry.get("label", "")).strip() or root.name
         if label in seen_labels:
             raise SourceConfigError(
@@ -113,24 +128,53 @@ def load_sources(sources_path: Path) -> list[Source]:
                 exclude=entry.get("exclude", []),
             )
         )
+    _validate_sources(sources)
     return sources
 
 
+def _validate_sources(sources: list[Source]) -> None:
+    if len({s.id for s in sources}) != len(sources):
+        raise SourceConfigError("duplicate source id")
+    if len({s.label for s in sources}) != len(sources):
+        raise SourceConfigError("duplicate source label")
+    for source in sources:
+        if not source.id or not source.label or "/" in source.label or "\\" in source.label:
+            raise SourceConfigError("sources need a stable id and a label without path separators")
+        for patterns in (source.include, source.exclude):
+            if not isinstance(patterns, list) or not all(
+                isinstance(p, str) and p and not Path(p).is_absolute()
+                and ".." not in Path(p).parts for p in patterns
+            ):
+                raise SourceConfigError("include/exclude must be lists of relative glob patterns")
+
+
 def _iter_files(source: Source) -> list[tuple[str, Path]]:
-    """Yield (display_path, abs_path) for files matching the source's patterns."""
+    """Complete a strict walk before returning; never interpret a failed scan as deletion."""
+    if not source.root.is_dir():
+        raise OSError("source root is unavailable")
+
+    def failed(exc: OSError) -> None:
+        raise exc
+
     seen: dict[str, Path] = {}
-    for pattern in source.include:
-        for path in source.root.rglob(pattern):
-            if not path.is_file():
+    for directory, dirs, files in os.walk(source.root, onerror=failed, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in _DEFAULT_EXCLUDE_DIRS]
+        for name in files:
+            path = Path(directory) / name
+            relative = path.relative_to(source.root)
+            if not any(
+                relative.match(pattern) or relative.match(pattern.removeprefix("**/"))
+                for pattern in source.include
+            ):
                 continue
-            rel = path.relative_to(source.root).as_posix()
-            if any(part in _DEFAULT_EXCLUDE_DIRS for part in path.relative_to(source.root).parts):
-                continue
+            rel = relative.as_posix()
             posix = path.as_posix()
             if any(fnmatch.fnmatch(posix, e) or fnmatch.fnmatch(rel, e) for e in source.exclude):
                 continue
             display = f"{source.label}/{rel}"
             seen[display] = path
+    if not source.root.is_dir():
+        raise OSError("source root disappeared during enumeration")
     return sorted(seen.items())
 
 
@@ -166,20 +210,13 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _init_manifest(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS files "
-        "(path TEXT PRIMARY KEY, sha256 TEXT NOT NULL, chunk_ids TEXT NOT NULL, "
-        "indexed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'indexed', "
-        "reason TEXT NOT NULL DEFAULT '')"
-    )
-    # Pre-Phase-3 manifests predate the status columns.
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
-    if "status" not in existing:
-        conn.execute("ALTER TABLE files ADD COLUMN status TEXT NOT NULL DEFAULT 'indexed'")
-    if "reason" not in existing:
-        conn.execute("ALTER TABLE files ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
-    conn.commit()
+def pipeline_fingerprint(source_id: str, collection: str, dim: int) -> str:
+    return _sha256(json.dumps({
+        "version": PIPELINE_VERSION, "source_id": source_id, "collection": collection,
+        "model": config.EMBED_MODEL, "model_revision": config.EMBED_MODEL_REVISION,
+        "dimension": dim, "chunk_max": config.CHUNK_MAX_CHARS,
+        "chunk_overlap": config.CHUNK_OVERLAP_CHARS,
+    }, sort_keys=True))
 
 
 async def _embed_in_batches(texts: list[str], embed_fn: EmbedTextsFn) -> list[list[float]]:
@@ -202,20 +239,52 @@ async def _embed_in_batches(texts: list[str], embed_fn: EmbedTextsFn) -> list[li
     return vectors
 
 
-def _record(
-    conn: sqlite3.Connection,
-    display: str,
-    sha: str,
-    chunk_ids: list[str],
-    status: str,
-    reason: str,
-) -> None:
-    conn.execute(
-        "REPLACE INTO files (path, sha256, chunk_ids, indexed_at, status, reason) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (display, sha, json.dumps(chunk_ids), datetime.now(UTC).isoformat(), status, reason),
-    )
-    conn.commit()
+async def _index_file(
+    entry: Entry, abs_path: Path, *, manifest: Manifest, client, collection: str,
+    fingerprint: str, embed_fn: EmbedTextsFn, rebuild: bool,
+) -> tuple[str, int]:
+    read = _read_text(abs_path)
+    if read.text is None:
+        if read.status == STATUS_SKIPPED:
+            delete_by_chunk_ids(client, collection, entry.chunk_ids)
+            entry.sha256, entry.chunk_ids, entry.fingerprint = "", [], ""
+        entry.status, entry.reason = read.status, read.reason
+        manifest.save(entry)
+        return ("skipped" if read.status == STATUS_SKIPPED else "errors"), 0
+
+    sha = _sha256(read.text)
+    if (
+        not rebuild and entry.sha256 == sha and entry.fingerprint == fingerprint
+        and chunks_current(client, collection, entry.chunk_ids, fingerprint, sha, entry.path)
+    ):
+        # Refresh display metadata without changing identity or paying for embeddings.
+        if entry.status != STATUS_INDEXED:
+            entry.status, entry.reason = STATUS_INDEXED, ""
+            manifest.save(entry)
+        return "unchanged", 0
+
+    chunks = chunk_file(entry.path, read.text)
+    for chunk in chunks:
+        chunk.chunk_id = json.dumps(
+            [entry.source_id, entry.relative_path, chunk.symbol, chunk.start_line, chunk.end_line],
+            separators=(",", ":"),
+        )
+    new_ids = [chunk.chunk_id for chunk in chunks]
+    vectors = await _embed_in_batches([chunk.text for chunk in chunks], embed_fn)
+    upsert_chunks(client, collection, [
+        (chunk.chunk_id, vector, {
+            **chunk.payload(), "corpus_version": sha[:12], "content_sha256": sha,
+            "pipeline_fingerprint": fingerprint, "source_id": entry.source_id,
+            "relative_path": entry.relative_path,
+        })
+        for chunk, vector in zip(chunks, vectors, strict=True)
+    ])
+    stale = [cid for cid in entry.chunk_ids if cid not in new_ids]
+    delete_by_chunk_ids(client, collection, stale)
+    entry.sha256, entry.chunk_ids, entry.fingerprint = sha, new_ids, fingerprint
+    entry.status, entry.reason = STATUS_INDEXED, ""
+    manifest.save(entry)
+    return "changed", len(chunks)
 
 
 async def run_ingest(
@@ -226,136 +295,132 @@ async def run_ingest(
     state_db: str,
     collection: str,
     dim: int,
+    rebuild: bool = False,
+    remove_source_ids: tuple[str, ...] = (),
 ) -> dict[str, int]:
+    _validate_sources(sources)
+    configured_ids = {s.id for s in sources}
+    if configured_ids.intersection(remove_source_ids):
+        raise SourceConfigError("remove a source from sources.yaml before using --remove-source")
     ensure_collection(client, collection, dim)
     Path(state_db).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(state_db)
     try:
-        _init_manifest(conn)
-        manifest = {
-            row[0]: (row[1], json.loads(row[2]))
-            for row in conn.execute("SELECT path, sha256, chunk_ids FROM files")
-        }
+        manifest = Manifest(conn)
+        manifest.adopt_sources(sources)
+        previous = manifest.entries()
+        stats = dict.fromkeys(
+            ("files_total", "changed", "unchanged", "deleted", "chunks", "skipped", "errors",
+             "sources_unavailable", "sources_removed", "sources_retained"), 0
+        )
+        # Only an explicit source removal may delete entries of an unconfigured source.
+        known = {row[0] for row in conn.execute("SELECT id FROM sources")}
+        unknown = set(remove_source_ids) - known
+        if unknown:
+            raise SourceConfigError(f"unknown source IDs requested for removal: {sorted(unknown)}")
+        for source_id in remove_source_ids:
+            for entry in previous.values():
+                if entry.source_id == source_id:
+                    delete_by_chunk_ids(client, collection, entry.chunk_ids)
+                    manifest.delete(entry)
+                    stats["deleted"] += 1
+            with conn:
+                conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+            stats["sources_removed"] += 1
+        for source_id in known - configured_ids - set(remove_source_ids):
+            manifest.source_status(
+                source_id, "retained", "not configured; explicit removal required"
+            )
+            stats["sources_retained"] += 1
 
-        current: dict[str, Path] = {}
         for source in sources:
-            current.update(dict(_iter_files(source)))
-
-        stats = {
-            "files_total": 0,
-            "changed": 0,
-            "unchanged": 0,
-            "deleted": 0,
-            "chunks": 0,
-            "skipped": 0,
-            "errors": 0,
-        }
-
-        for display, abs_path in current.items():
-            read = _read_text(abs_path)
-            if read.text is None:
-                old_ids = manifest.get(display, (None, []))[1]
-                if read.status == STATUS_SKIPPED:
-                    # It is no longer indexable, so its old vectors are wrong
-                    # rather than merely stale — drop them.
-                    if old_ids:
-                        delete_by_chunk_ids(client, collection, old_ids)
-                    _record(conn, display, "", [], STATUS_SKIPPED, read.reason)
-                    stats["skipped"] += 1
-                else:
-                    # Transient: keep the last good vectors and say why.
-                    if display in manifest:
-                        _record(
-                            conn,
-                            display,
-                            manifest[display][0],
-                            old_ids,
-                            STATUS_ERROR,
-                            read.reason,
-                        )
-                    stats["errors"] += 1
+            fingerprint = pipeline_fingerprint(source.id, collection, dim)
+            old = {key: entry for key, entry in previous.items() if entry.source_id == source.id}
+            try:
+                files = _iter_files(source)
+            except OSError as exc:
+                reason = f"source scan failed: {type(exc).__name__}"
+                manifest.source_status(source.id, STATUS_ERROR, reason)
+                for entry in old.values():
+                    entry.status, entry.reason = STATUS_ERROR, reason
+                    manifest.save(entry)
+                stats["errors"] += 1
+                stats["sources_unavailable"] += 1
                 continue
 
-            stats["files_total"] += 1
-            text = read.text
-            sha = _sha256(text)
-            if display in manifest and manifest[display][0] == sha:
-                stats["unchanged"] += 1
-                continue
-
-            chunks = chunk_file(display, text)
-            new_ids = [c.chunk_id for c in chunks]
-            old_ids = manifest.get(display, (None, []))[1]
-
-            if chunks:
+            current = set()
+            errors_before = stats["errors"]
+            for display, abs_path in files:
+                relative = abs_path.relative_to(source.root).as_posix()
+                key = file_key(source.id, relative)
+                current.add(key)
+                entry = old.get(key) or Entry(source.id, relative, display)
+                # A label rename updates citations by re-upserting, but preserves point IDs.
+                renamed = entry.path != display
+                entry.path = display
+                stats["files_total"] += 1
                 try:
-                    vectors = await _embed_in_batches([c.text for c in chunks], embed_fn)
-                except Exception as exc:  # noqa: BLE001 - one bad file must not end the run
-                    if display in manifest:
-                        _record(
-                            conn,
-                            display,
-                            manifest[display][0],
-                            old_ids,
-                            STATUS_ERROR,
-                            f"embedding failed: {type(exc).__name__}",
-                        )
-                    stats["errors"] += 1
-                    continue
-                # Upsert first: until the new chunks are in, the old ones are the
-                # only thing making this file findable.
-                upsert_chunks(
-                    client,
-                    collection,
-                    [
-                        (c.chunk_id, v, {**c.payload(), "corpus_version": sha[:12]})
-                        for c, v in zip(chunks, vectors, strict=True)
-                    ],
-                )
+                    outcome, count = await _index_file(
+                        entry, abs_path, manifest=manifest, client=client, collection=collection,
+                        fingerprint=fingerprint, embed_fn=embed_fn, rebuild=rebuild or renamed,
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain the last good manifest for retry
+                    entry.status = STATUS_ERROR
+                    entry.reason = f"indexing/embedding failed: {type(exc).__name__}"
+                    manifest.save(entry)
+                    outcome, count = "errors", 0
+                stats[outcome] += 1
+                stats["chunks"] += count
 
-            stale = [cid for cid in old_ids if cid not in new_ids]
-            if stale:
-                delete_by_chunk_ids(client, collection, stale)
-            _record(conn, display, sha, new_ids, STATUS_INDEXED, "")
-            stats["changed"] += 1
-            stats["chunks"] += len(chunks)
-
-        for gone in set(manifest) - set(current):
-            delete_by_chunk_ids(client, collection, manifest[gone][1])
-            conn.execute("DELETE FROM files WHERE path = ?", (gone,))
-            conn.commit()
-            stats["deleted"] += 1
-
+            # A file can vanish or become unreadable after enumeration. Preserve all
+            # deletions for that source until a complete, healthy run confirms them.
+            if stats["errors"] == errors_before:
+                for key in old.keys() - current:
+                    entry = old[key]
+                    delete_by_chunk_ids(client, collection, entry.chunk_ids)
+                    manifest.delete(entry)
+                    stats["deleted"] += 1
+                manifest.source_status(source.id, STATUS_INDEXED)
+            else:
+                manifest.source_status(source.id, STATUS_ERROR, "one or more files failed indexing")
         return stats
     finally:
         conn.close()
 
 
 def main() -> None:
-    sources_path = Path(__file__).resolve().parent / "sources.yaml"
+    parser = argparse.ArgumentParser(description="Incrementally index curated sources.")
+    parser.add_argument(
+        "--sources", type=Path, default=Path(__file__).resolve().parent / "sources.yaml"
+    )
+    parser.add_argument("--rebuild", action="store_true", help="re-embed all available files")
+    parser.add_argument(
+        "--remove-source", action="append", default=[], metavar="ID",
+        help="explicitly delete an unconfigured source's index and manifest entries",
+    )
+    args = parser.parse_args()
     try:
-        sources = load_sources(sources_path)
+        sources = load_sources(args.sources)
     except SourceConfigError as exc:
         raise SystemExit(str(exc)) from exc
-    if not sources:
-        print("No sources configured in ingest/sources.yaml — nothing to do.")
-        return
     client = get_client(config.QDRANT_URL)
-    stats = asyncio.run(
-        run_ingest(
-            sources,
-            client=client,
-            embed_fn=embed_texts,
-            state_db=config.STATE_DB,
-            collection=config.QDRANT_COLLECTION,
-            dim=config.EMBED_DIM,
-        )
-    )
+    try:
+        stats = asyncio.run(run_ingest(
+            sources, client=client, embed_fn=embed_texts, state_db=config.STATE_DB,
+            collection=config.QDRANT_COLLECTION, dim=config.EMBED_DIM, rebuild=args.rebuild,
+            remove_source_ids=tuple(args.remove_source),
+        ))
+    finally:
+        client.close()
     print(
         f"ingest complete: {stats['changed']} changed, {stats['unchanged']} unchanged, "
         f"{stats['deleted']} removed, {stats['skipped']} skipped, "
-        f"{stats['errors']} errored, {stats['chunks']} chunks embedded"
+        f"{stats['errors']} errored, {stats['chunks']} chunks embedded; "
+        f"{stats['sources_unavailable']} sources unavailable, "
+        f"{stats['sources_retained']} unconfigured sources retained"
     )
+    if stats["errors"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

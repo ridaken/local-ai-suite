@@ -7,9 +7,13 @@
 #   id       stable unique name — never reuse or recycle it; it identifies this
 #            source across renames and moves. Required.
 #   root     folder to walk
+#            relative paths are resolved from the parent of this file's folder
+#            (the repository root for ingest/sources.yaml), never the shell cwd
 #   label    prefix used in citations (must be unique across sources)
 #   include/exclude  globs relative to root (.git/.venv/node_modules/__pycache__
 #            are always skipped)
+# Missing/unreadable roots retain the last good index. Removing an entry also
+# retains its vectors until you run: python -m ingest.ingest --remove-source <id>
 sources:
   - id: local-ai-suite
     root: .
