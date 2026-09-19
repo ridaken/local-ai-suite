@@ -21,8 +21,18 @@ def compose_project(tmp_path):
     for name in ("docker-compose.yml", "docker-compose.legacy-mcpo.yml"):
         shutil.copyfile(ROOT / name, tmp_path / name)
     (tmp_path / "config").mkdir()
+    (tmp_path / "config/secrets").mkdir()
+    for name in (
+        "admin_token.txt", "mcp_api_key.txt", "mcpo_api_key.txt",
+        "kagi_api_key.txt", "ncbi_api_key.txt",
+    ):
+        (tmp_path / "config/secrets" / name).write_text(
+            "x" * 48 if "api_key" in name or "token" in name else "",
+            encoding="utf-8",
+        )
     (tmp_path / "scripts").mkdir()
     shutil.copyfile(ROOT / "scripts/compose.ps1", tmp_path / "scripts/compose.ps1")
+    shutil.copyfile(ROOT / "scripts/init-secrets.ps1", tmp_path / "scripts/init-secrets.ps1")
     values = {
         "ZIM_DIR": (tmp_path / "custom corpus").as_posix(),
         "STATE_DIR": (tmp_path / "custom state").as_posix(),
@@ -126,3 +136,74 @@ def test_wrapper_does_not_start_after_failed_validation(compose_project):
     assert result.returncode != 0
     assert "Compose configuration validation failed" in result.stderr
     assert "UNEXPECTED_START" not in result.stderr
+
+
+def test_wrapper_forwards_short_detach_to_compose(compose_project):
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if not shell:
+        pytest.skip("PowerShell is not installed")
+    root, _, env = compose_project
+    command = r"""
+    function docker {
+        if ($args -contains 'config') {
+            $global:LASTEXITCODE = 0
+            return '{"services":{}}'
+        }
+        $global:LASTEXITCODE = 0
+        Write-Output ('FORWARDED:' + ($args -join '|'))
+    }
+    & './scripts/compose.ps1' up -d --build
+    """
+    result = subprocess.run(
+        [shell, "-NoProfile", "-Command", command], cwd=root, env=env,
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    forwarded = next(line for line in result.stdout.splitlines() if line.startswith("FORWARDED:"))
+    assert "|up|" in forwarded
+    assert "--build" in forwarded
+    assert "--detach" in forwarded
+
+
+def test_secret_initializer_repairs_empty_directory_placeholders(compose_project):
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if not shell:
+        pytest.skip("PowerShell is not installed")
+    root, _, env = compose_project
+    for path in (root / "config/secrets").iterdir():
+        path.unlink()
+        path.mkdir()
+
+    result = subprocess.run(
+        [shell, "-NoProfile", "-File", str(root / "scripts/init-secrets.ps1")],
+        cwd=root, env=env, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for name in ("admin_token.txt", "mcp_api_key.txt", "mcpo_api_key.txt"):
+        value = (root / "config/secrets" / name).read_text(encoding="utf-8")
+        assert len(value) >= 32
+    for name in ("kagi_api_key.txt", "ncbi_api_key.txt"):
+        assert (root / "config/secrets" / name).is_file()
+        assert not (root / "config/secrets" / name).read_text(encoding="utf-8")
+
+
+def test_secret_initializer_refuses_nonempty_directory(compose_project):
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if not shell:
+        pytest.skip("PowerShell is not installed")
+    root, _, env = compose_project
+    path = root / "config/secrets/admin_token.txt"
+    path.unlink()
+    path.mkdir()
+    marker = path / "do-not-delete"
+    marker.write_text("preserve", encoding="utf-8")
+
+    result = subprocess.run(
+        [shell, "-NoProfile", "-File", str(root / "scripts/init-secrets.ps1")],
+        cwd=root, env=env, capture_output=True, text=True,
+    )
+
+    assert result.returncode != 0
+    assert "non-empty directory" in result.stderr
+    assert marker.read_text(encoding="utf-8") == "preserve"

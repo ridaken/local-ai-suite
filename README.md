@@ -29,18 +29,23 @@ and enough disk space for the ZIM corpus you intend to install.
 
 1. Copy `config/.env.example` to `config/.env` and set `ZIM_DIR`, `STATE_DIR`,
    and `QDRANT_STORAGE` to host paths you control. Keep them separate.
-2. Generate local service credentials and optional provider secret files:
+2. Run the setup launcher:
 
    ```powershell
-   .\scripts\init-secrets.ps1
+   .\setup.cmd
    ```
 
-   The helper writes ignored files under `config/secrets/`. Startup never
-   generates or prints credentials. Put a Kagi or NCBI API key into its matching
-   file if you use that provider; empty files leave those integrations disabled.
-3. Validate and start:
+   The launcher works even when PowerShell's script execution policy is restricted.
+   It creates missing credentials, repairs empty directory placeholders left by a
+   premature Docker start, validates the resolved Compose configuration, and starts
+   the stack detached. It never prints credential values. Put a Kagi or NCBI API
+   key into its matching file if you use that provider; empty files leave those
+   integrations disabled.
+3. For manual setup or troubleshooting, run the individual helpers:
 
    ```powershell
+   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+   .\scripts\init-secrets.ps1
    .\scripts\compose.ps1 config --quiet
    .\scripts\compose.ps1 up -d --build
    ```
@@ -101,8 +106,19 @@ host or exposes port 8000 on the host.
 Version 0.1 stored runtime settings and provider secrets beside the ZIM corpus.
 Version 0.2 refuses hosted readiness while that legacy `settings.db` remains.
 
-Stop the old stack, configure the new `ZIM_DIR` and `STATE_DIR`, then preview the
-migration. The command is dry-run-only unless `--apply` is supplied:
+Stop the old stack and configure the new `ZIM_DIR` and `STATE_DIR`. The setup
+launcher detects the legacy database, prints a dry-run migration preview, and
+stops with the command needed to approve it:
+
+```powershell
+.\setup.cmd
+.\setup.cmd -ApplyMigration
+```
+
+To run the migration separately, use the helper below. It resolves the corpus
+and state paths from Compose, so blank variables using Compose defaults and paths
+containing spaces work consistently. The command is dry-run-only unless `-Apply`
+is supplied:
 
 ```powershell
 .\scripts\migrate_v02.ps1
@@ -122,9 +138,10 @@ The migration:
 - creates missing strong admin and MCP credentials without printing them; and
 - removes the corpus-side database only after backup and target verification.
 
-Existing secret files are never overwritten. If any apply step fails, the
-legacy database remains in place. Resolve the failure before retrying; a present
-backup intentionally prevents an ambiguous second migration.
+Existing non-empty secret files are never overwritten; empty placeholders may be
+populated from the legacy database or replaced with generated service credentials.
+If any apply step fails, the legacy database remains in place. Resolve the failure
+before retrying; a present backup intentionally prevents an ambiguous second migration.
 
 ### Migration rollback
 
