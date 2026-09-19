@@ -70,6 +70,28 @@ def test_migration_backs_up_copies_behavior_and_isolates_secrets(tmp_path):
     assert admin_token != mcp_key
 
 
+def test_migration_populates_empty_secret_placeholders(tmp_path):
+    legacy = _legacy_db(tmp_path / "corpus" / "settings.db")
+    state = tmp_path / "state"
+    secret_dir = tmp_path / "secrets"
+    secret_dir.mkdir()
+    for name in (
+        "kagi_api_key.txt", "ncbi_api_key.txt", "admin_token.txt", "mcp_api_key.txt"
+    ):
+        (secret_dir / name).write_text("", encoding="utf-8")
+
+    migrate(legacy, state, secret_dir, apply=True)
+
+    assert (secret_dir / "kagi_api_key.txt").read_text(encoding="utf-8").strip() == (
+        "kagi-super-secret"
+    )
+    assert (secret_dir / "ncbi_api_key.txt").read_text(encoding="utf-8").strip() == (
+        "ncbi-super-secret"
+    )
+    assert len((secret_dir / "admin_token.txt").read_text(encoding="utf-8").strip()) >= 32
+    assert len((secret_dir / "mcp_api_key.txt").read_text(encoding="utf-8").strip()) >= 32
+
+
 def test_migration_failure_does_not_remove_legacy_database(tmp_path, monkeypatch):
     legacy = _legacy_db(tmp_path / "corpus" / "settings.db")
 

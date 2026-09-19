@@ -22,6 +22,21 @@ _GENERATED_SECRET_FILES = {
 }
 
 
+def _secret_file_has_value(path: Path) -> bool:
+    if not path.exists():
+        return False
+    if not path.is_file():
+        raise ValueError(f"secret path must be a file: {path}")
+    return bool(path.read_text(encoding="utf-8").strip())
+
+
+def _write_secret(path: Path, value: str) -> None:
+    if path.exists() and not path.is_file():
+        raise ValueError(f"secret path must be a file: {path}")
+    path.write_text(value + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
 def migrate(
     legacy_db: Path,
     state_dir: Path,
@@ -48,13 +63,13 @@ def migrate(
     for key, filename in _SECRET_FILES.items():
         value = settings.get(f"config.{key}", "")
         destination = secret_dir / filename
-        if value and not destination.exists():
+        if value and not _secret_file_has_value(destination):
             actions.append(f"write configured {key} to {destination}")
         elif value:
             actions.append(f"keep existing secret file for {key} at {destination}")
     for key, filename in _GENERATED_SECRET_FILES.items():
         destination = secret_dir / filename
-        if destination.exists():
+        if _secret_file_has_value(destination):
             actions.append(f"keep existing secret file for {key} at {destination}")
         else:
             actions.append(f"generate a strong {key} in {destination}")
@@ -77,16 +92,12 @@ def migrate(
     for key, filename in _SECRET_FILES.items():
         value = settings.get(f"config.{key}", "")
         destination = secret_dir / filename
-        if value and not destination.exists():
-            with destination.open("x", encoding="utf-8") as secret_file:
-                secret_file.write(value + "\n")
-            destination.chmod(0o600)
+        if value and not _secret_file_has_value(destination):
+            _write_secret(destination, value)
     for filename in _GENERATED_SECRET_FILES.values():
         destination = secret_dir / filename
-        if not destination.exists():
-            with destination.open("x", encoding="utf-8") as secret_file:
-                secret_file.write(secrets.token_urlsafe(48) + "\n")
-            destination.chmod(0o600)
+        if not _secret_file_has_value(destination):
+            _write_secret(destination, secrets.token_urlsafe(48))
     if not backup.is_file() or not target.is_file():
         raise RuntimeError("migration verification failed; legacy database was not removed")
     legacy_db.unlink()
