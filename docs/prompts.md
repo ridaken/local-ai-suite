@@ -17,7 +17,7 @@ at the same gateway, so you don't have to choose one:
 
 | Task | Client | Where the profile lives |
 | --- | --- | --- |
-| Chat, research, verify-and-cite Q&A | **OpenWebUI** (via `mcpo`) | a custom model's system prompt + tool scope (below) |
+| Chat, research, verify-and-cite Q&A | **OpenWebUI** (native MCP, talks to `/mcp`) | a custom model's system prompt + tool scope (below) |
 | Agentic coding | **pi** (native MCP, talks to `/mcp`) | pi's own agent config |
 
 pi is built as a coding agent with its own loop and file access; OpenWebUI is a
@@ -32,9 +32,8 @@ function-calling mode**, and since it's one underlying llama-server model it
 costs **no extra VRAM**. Two settings matter for every retrieval profile:
 
 - **Function Calling: Native.** The verify prompts below describe an *iterative*
-  loop (draft → look up → reconcile → answer). In "Default" mode OpenWebUI does a
-  single up-front tool pass and the model can't act on results, so the prompt is
-  inert. Native is required.
+  loop (draft → look up → reconcile → answer). OpenWebUI's legacy tool-calling
+  mode cannot reliably run that loop, so Native is required.
 - **Tool access:** enable only the tools a profile should use.
 
 ---
