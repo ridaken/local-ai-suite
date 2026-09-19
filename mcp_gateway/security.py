@@ -147,7 +147,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # Firefox serializes the Origin header as "null" for navigation-mode
+        # form POSTs under no-referrer, which makes our same-origin check reject
+        # forms served by this application. Keep cross-origin referrers private
+        # while allowing same-origin form submissions to retain their origin.
+        response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Cache-Control"] = "no-store"
         return response
 

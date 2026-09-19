@@ -109,6 +109,7 @@ def test_admin_login_cookie_headers_and_session_fixation(tmp_path):
     assert response.headers["cache-control"] == "no-store"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
     assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "same-origin"
 
 
 def test_admin_login_logout_and_expiration(tmp_path):
