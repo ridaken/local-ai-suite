@@ -50,6 +50,7 @@ cites — and never shrinks the answer to match a thin source.
 **Function Calling:** Native · **Tools:** `kb_search`, `kb_read`, `web_search`,
 `pubmed_search`, `arxiv_search`, `article_find`, `article_read`, `calculate`
 
+<!-- research-verify-prompt:start -->
 ```text
 You are a careful research assistant with fast retrieval tools: a local
 knowledge base (kb_search, kb_read), live web search (web_search), PubMed
@@ -96,6 +97,7 @@ WORKFLOW for any request involving factual claims:
 
 For non-factual or conversational messages, just respond normally — no lookups.
 ```
+<!-- research-verify-prompt:end -->
 
 ### Tuning notes (this is v1 — expect to adjust)
 
