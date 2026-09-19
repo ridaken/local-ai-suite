@@ -84,10 +84,68 @@ native MCP connection:
 - URL: `http://las-gateway:8090/mcp`
 - Header: `Authorization: Bearer <MCP_API_KEY>`
 
-Native MCP is the documented OpenWebUI default. Attach the OpenWebUI container
-to `las-clients`, then configure the endpoint and bearer header above. Only the
-gateway and client integrations join this network; Qdrant, Kiwix, and admin stay
-on the backend side of the boundary.
+Only the gateway and client integrations join `las-clients`; Qdrant, Kiwix, and
+admin stay on the backend side of the boundary.
+
+### OpenWebUI (native MCP)
+
+OpenWebUI connects directly to the gateway over streamable HTTP. The suite is an
+external **tool server**, not an OpenWebUI Knowledge collection or model-provider
+connection.
+
+Attach an existing OpenWebUI container to the client network (replace
+`open-webui` if the container has a different name):
+
+```powershell
+docker network connect las-clients open-webui
+```
+
+A manual attachment survives container restarts but not container replacement.
+For a Compose-managed OpenWebUI deployment, make the attachment durable in that
+deployment's Compose file:
+
+```yaml
+services:
+  open-webui:
+    networks:
+      - default
+      - las-clients
+
+networks:
+  las-clients:
+    external: true
+```
+
+In OpenWebUI, go to **Settings > Admin > Integrations > External Tool Servers**
+and add:
+
+- Type: `MCP (Streamable HTTP)` (not OpenAPI)
+- Name: `Local AI Suite`
+- ID: `local_ai_suite`
+- URL: `http://las-gateway:8090/mcp`
+- Auth: `Bearer`
+- Key: the exact contents of `config/secrets/mcp_api_key.txt`
+
+On Windows, copy the credential without displaying it or adding whitespace:
+
+```powershell
+(Get-Content -Raw .\config\secrets\mcp_api_key.txt).Trim() | Set-Clipboard
+```
+
+Save the server, grant the intended users access, and enable it for the relevant
+model or chat. Common setup failures are diagnostic:
+
+- **Ollama: Network Problem** means the MCP URL was added under the Ollama/model
+  provider Connections page instead of Integrations.
+- A request to `/mcp/openapi.json` means the server type is OpenAPI instead of
+  MCP Streamable HTTP.
+- `401 Unauthorized` means the bearer value is missing or does not exactly match
+  `mcp_api_key.txt`; `mcpo_api_key.txt` is a different credential.
+- A DNS or connection error for `las-gateway` means the OpenWebUI container is
+  not attached to `las-clients`.
+
+See the [OpenWebUI MCP documentation](https://docs.openwebui.com/features/extensibility/mcp/)
+for client-version-specific UI details.
 
 For research profiles, enable `pubmed_search`, `arxiv_search`, `article_find`,
 and `article_read` together and paste the profile from `docs/prompts.md` into the
@@ -144,8 +202,9 @@ candidate selection and full-text retrieval.
 
 ### Optional legacy mcpo bridge
 
-`mcpo` is no longer started by default and publishes no host port. To enable the
-legacy bridge on `las-clients`:
+Use `mcpo` only for an OpenWebUI version without native streamable-HTTP MCP
+support. It is not started by default and publishes no host port. Attach
+OpenWebUI to `las-clients` as described above, then enable the bridge:
 
 ```powershell
 .\scripts\compose.ps1 -Legacy up -d mcpo
@@ -153,7 +212,11 @@ legacy bridge on `las-clients`:
 
 The bridge reads its client-facing `MCPO_API_KEY` and downstream `MCP_API_KEY`
 from Docker secret files. It never receives them as command-line values from the
-host or exposes port 8000 on the host.
+host or exposes port 8000 on the host. Register it in OpenWebUI as an **OpenAPI**
+external tool server at `http://mcpo:8000`, using Bearer auth with the contents
+of `config/secrets/mcpo_api_key.txt`. Do not point an old, separately created
+MCPO container at the authenticated v0.2 gateway; recreate it through the wrapper
+above so it receives the downstream gateway credential and correct network.
 
 ## Migrating a v0.1 installation
 

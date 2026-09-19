@@ -37,7 +37,7 @@ matter more than corpus size).
 
 ```
                  ┌────────────── Clients ──────────────┐
-                 │  pi (MCP)   OpenWebUI (mcpo→OpenAPI) │
+                 │     pi + OpenWebUI (native MCP)      │
                  └───────────────────┬──────────────────┘
                                      │  tool calls
                           ┌──────────▼───────────┐
@@ -46,15 +46,14 @@ matter more than corpus size).
                           │  web_search          │
                           │  pubmed_search       │
                           │  arxiv_search        │
-                          │  calculate / python  │
-                          │  (wolfram, units…)   │
+                          │  calculate           │
                           └───┬───────────┬──────┘
               ┌───────────────┘           └───────────────┐
-       ┌──────▼──────┐  ┌────────────┐  ┌────────────┐  ┌─▼──────────┐
-       │ Kiwix-serve │  │  Qdrant    │  │  SearXNG   │  │ Live APIs  │
-       │ ZIM full-   │  │ curated    │  │ metasearch │  │ NCBI/arXiv │
-       │ text (FTS)  │  │ vectors    │  │ (local)    │  │ Kagi/Wolf. │
-       └─────────────┘  └────────────┘  └────────────┘  └────────────┘
+       ┌──────▼──────┐  ┌────────────┐  ┌───────────────┐
+       │ Kiwix-serve │  │  Qdrant    │  │ Live APIs     │
+       │ ZIM full-   │  │ curated    │  │ Kagi, NCBI,   │
+       │ text (FTS)  │  │ vectors    │  │ and arXiv     │
+       └─────────────┘  └────────────┘  └───────────────┘
                           ▲
                  ┌────────┴─────────┐
                  │ Ingestion script │  ← scheduled, incremental
@@ -93,8 +92,8 @@ matter more than corpus size).
 - **Qdrant** (Docker) — vector DB reserved for *bounded, high-value, semantic*
   corpora: your own repos/notes, selected PDFs/docs, curated medical set. NOT the
   whole of Wikipedia/PubMed.
-- **SearXNG** (Docker) — local metasearch for web (no API key, local-first).
-  Keep Kagi available too; expose both behind one `web_search` tool.
+- **Kagi** backs the current live `web_search` tool. SearXNG remains a planned,
+  optional local metasearch backend for a later phase.
 
 **3. MCP gateway** (the new core deliverable — one Python MCP server)
 - Control flow: the gateway is **passive** — it advertises tool schemas and
@@ -111,23 +110,24 @@ matter more than corpus size).
     snippet previews; the model passes a result's source URL back to read the
     full article in ~4K-char windows, paging with `offset` until satisfied.
     Restricted to the kiwix host (it must not be a generic fetch tool).
-  - `web_search(query)` — SearXNG/Kagi.
+  - `web_search(query)` — Kagi today, with SearXNG reserved as a future backend.
   - `pubmed_search(query)` — NCBI E-utilities (live, always current).
   - `arxiv_search(query)` — arXiv API (live).
   - `article_find(article_id, query)` — download a selected PubMed/PMC or arXiv
     article and return query-relevant passages with evidence-level metadata.
   - `article_read(article_id, offset)` — page through the selected article's
     normalized text; explicitly reports full-text versus abstract fallback.
-  - `calculate(expr)` / `python_exec(code)` — sandboxed Python (sympy/numpy) for
-    math; more flexible than Wolfram for most needs.
-  - Optional: `wolfram(query)` (API key), `units`, `datetime`.
+  - `calculate(expression)` — bounded arithmetic and whitelisted math functions.
+  - Possible future tools: sandboxed Python, Wolfram, units, and datetime.
   - Optional `route(origin, destination, mode)` — see geospatial subsystem below.
 - **kb_search and web_search are deliberately separate** so the model (or a skill)
   can cross-check one against the other — your "second opinion / verify" goal.
 - Distribution:
   - **pi** → point its MCP config at the gateway (native).
-  - **OpenWebUI** → run `mcpo` to expose the gateway as an OpenAPI tool server
-    (OpenWebUI's supported path); register that URL in OpenWebUI Tools.
+  - **OpenWebUI** → attach its container to `las-clients` and register
+    `http://las-gateway:8090/mcp` as an MCP Streamable HTTP external tool server.
+    `mcpo` remains an optional compatibility bridge for clients without native
+    streamable-HTTP MCP support.
 
 **4. Ingestion / update pipeline** (the script you asked about)
 - Orchestrated by a Python entrypoint, scheduled via **Windows Task Scheduler**.
@@ -231,7 +231,8 @@ New repo `local-ai-suite/` under `C:\Users\Tom\Documents\Repos`:
 
 ```
 local-ai-suite/
-  docker-compose.yml          # qdrant, kiwix-serve, searxng, mcpo
+  docker-compose.yml          # gateway, admin, qdrant, and kiwix-serve
+  docker-compose.legacy-mcpo.yml # optional MCP-to-OpenAPI compatibility bridge
   config/.env                 # API keys, endpoints (gitignored)
   mcp_gateway/
     server.py                 # FastMCP server, registers tools
@@ -266,8 +267,8 @@ phase skips Qdrant/embed/rerank entirely and still delivers a working, useful hu
    `DATA_ROOT`/`ZIM_DIR`. Download **one** ZIM (Wikipedia-nopic) to prove FTS.
 2. MCP gateway (`server.py`) exposing `kb_search` (Kiwix FTS), `web_search`,
    `pubmed_search`, `arxiv_search`, `calculate`. Test standalone with an inspector.
-3. Client wiring: connect **pi** (native MCP); run **mcpo** and register the
-   OpenAPI URL in **OpenWebUI**. Confirm both can call the tools + get cited answers.
+3. Client wiring: connect **pi** and **OpenWebUI** to `/mcp` with native MCP.
+   Confirm both can call the tools and return cited answers.
 
 ### Phase 2 (done) — semantic search over your own data
 4. Inference endpoints: bge-m3 embed + bge-reranker-v2-m3 on llama-server; smoke-test.
@@ -283,15 +284,15 @@ the whole stack *plus* a local config/status page; no hand-editing `.env` for
 routine operation. Scope for v1: **sources + toggles** (the corpus-builder UI is
 deferred — see Phase 4+).
 
-Shape: the gateway becomes a **third compose service** (own small image). One
-Python process, two surfaces mounted in one Starlette/FastAPI app:
-- `/mcp` — MCP over **streamable HTTP** (pi and mcpo re-point here; stdio stays
-  the default transport for non-docker use via the existing `LAS_TRANSPORT`).
-- `/` — admin UI (server-rendered + htmx, **no build chain**) + REST API.
+Shape: the data plane and management plane run as separate Compose services:
+- the gateway exposes `/mcp` over **streamable HTTP** for pi and OpenWebUI while
+  stdio remains available for non-Docker clients;
+- the admin service exposes the server-rendered management UI and REST API on a
+  separate authenticated endpoint.
 
-8. **Gateway service**: Dockerfile + compose entry (bind-mount `ZIM_DIR` rw for
-   downloads, settings/state volume); HTTP transport path in `server.py`
-   mounting FastMCP's ASGI app alongside the admin routes.
+8. **Gateway and admin services**: the gateway receives read-only corpus/state
+   mounts and exposes the FastMCP HTTP transport; the separately authenticated
+   admin service owns corpus/state writes, downloads, and management routes.
 9. **Settings store** (sqlite, beside `state.db`): runtime toggles read live per
    request — enabled ZIM books / Qdrant collections, retrieval mode
    (hybrid / lexical-only / vector-only), candidate counts, rerank on/off,
@@ -334,7 +335,7 @@ Python process, two surfaces mounted in one Starlette/FastAPI app:
   known term → returns hits (FTS works).
 - Call `kb_search`, `web_search`, `pubmed_search`, `arxiv_search`, `calculate` on
   the gateway directly → sensible results.
-- In **pi** and **OpenWebUI** (via mcpo): ask a Wikipedia-answerable question → the
+- In **pi** and **OpenWebUI** (native MCP): ask a Wikipedia-answerable question → the
   model calls `kb_search` and answers with a citation; ask a math question →
   `calculate` fires. If this holds, Phase 1 is done.
 
@@ -348,13 +349,13 @@ Python process, two surfaces mounted in one Starlette/FastAPI app:
   source/URL/date**.
 - In **pi**: ask a question that needs retrieval (e.g. an obscure library API) →
   model invokes `kb_search`, answers **with citation**. Repeat in **OpenWebUI**
-  via the mcpo tool. Ask a math question → `calculate`/`python_exec` fires.
+  through the native MCP integration. Ask a math question → `calculate` fires.
 - Cross-check test: a question where web and KB might disagree → confirm the
   model can call both and reconcile.
 
 **Phase 3 acceptance gate (management plane):**
-- `docker compose up` → kiwix + qdrant + **gateway**; `/` shows the dashboard;
-  an MCP inspector (or pi) lists the 5 tools at `/mcp` over HTTP.
+- `docker compose up` → kiwix + qdrant + **gateway** + **admin**; the admin port
+  shows the dashboard and an MCP inspector (or pi) lists the tools at `/mcp`.
 - Download a small DevDocs ZIM from the UI → it appears in kiwix **without a
   manual restart** → `kb_search` returns hits from it.
 - Disable that book in the UI → the next `kb_search` excludes it; re-enable →
@@ -370,10 +371,9 @@ Python process, two surfaces mounted in one Starlette/FastAPI app:
 ## Open considerations (decide during build)
 - Exact ZIM set + total disk budget for `zim/` (StackOverflow alone is tens of GB).
 - Whether to add `llama-swap` now or only once GPU contention appears.
-- Sandboxing approach for `python_exec` (subprocess + resource limits vs. a
-  container) — start restrictive.
-- Phase 3 verify-early items: `python-libzim` wheel works in the gateway image
-  for generating `library.xml` entries; kiwix-serve `--monitorLibrary` behavior
-  on bind-mounted volumes under Docker Desktop; exact pi config shape for a
-  streamable-HTTP MCP server; `mcpo` flag for connecting to an HTTP MCP server
-  (vs launching a stdio command).
+- Whether a future `python_exec` tool is useful enough to justify its sandboxing
+  and operational risk.
+- Phase 3 verify-early items: `python-libzim` works in the application image for
+  generating `library.xml` entries; kiwix-serve `--monitorLibrary` behavior on
+  bind-mounted volumes under Docker Desktop; and durable client-container
+  attachment to the external `las-clients` network.
