@@ -1,0 +1,95 @@
+# The labels were independently adjudicated from PubMed abstracts/passages.
+# The model under evaluation did not participate in creating the gold set.
+version: 1
+name: pubmed-late-window-thrombectomy
+question: >-
+  In adults with anterior-circulation acute ischemic stroke from large-vessel
+  occlusion who were last known well 6–24 hours earlier, which pivotal randomized
+  controlled trials established whether imaging-selected mechanical thrombectomy
+  improves 90-day functional outcomes compared with medical therapy alone, and
+  what did they find?
+snapshot: ../snapshots/pubmed_late_window_thrombectomy_v1.json
+
+candidate_pmids:
+  - "29364767"
+  - "29129157"
+  - "25671797"
+  - "38346442"
+  - "34774198"
+  - "32224754"
+  - "37165864"
+  - "30097484"
+  - "28946832"
+  - "39380893"
+  - "33627168"
+  - "29807887"
+  - "33239306"
+  - "26763028"
+  - "31072970"
+  - "33077580"
+  - "31152058"
+  - "36718751"
+  - "33632884"
+  - "29986935"
+
+judgments:
+  - pmid: "29129157"
+    label: must_select
+    rationale: DAWN is the pivotal randomized trial of clinical-core mismatch selection from 6 to 24 hours and directly reports 90-day disability and independence.
+  - pmid: "29364767"
+    label: must_select
+    rationale: DEFUSE 3 is the pivotal randomized trial of perfusion-selected thrombectomy from 6 to 16 hours and directly reports 90-day modified Rankin outcomes.
+  - pmid: "34774198"
+    label: supporting
+    rationale: AURORA is an individual-patient meta-analysis confirming benefit across six late-window randomized trials, but it is not one of the requested pivotal primary trials.
+  - pmid: "32224754"
+    label: supporting
+    rationale: Review article that accurately contextualizes the late-window evidence.
+  - pmid: "37165864"
+    label: supporting
+    rationale: Observational analysis of imaging-selection paradigms that provides implementation context rather than the pivotal efficacy evidence.
+  - pmid: "30097484"
+    label: supporting
+    rationale: Relevant late-window imaging-selection study, but not a pivotal randomized comparison of thrombectomy with medical therapy.
+  - pmid: "39380893"
+    label: supporting
+    rationale: Focused late-presentation guideline that synthesizes the primary evidence.
+  - pmid: "33239306"
+    label: supporting
+    rationale: Direct comparison of imaging criteria and outcomes across DAWN, DEFUSE 3, and ESCAPE-NA1.
+  - pmid: "26763028"
+    label: supporting
+    rationale: Earlier MRI-selected randomized evidence up to 12 hours that is historically relevant but did not establish the modern 6-24-hour indication.
+  - pmid: "31152058"
+    label: supporting
+    rationale: European guideline synthesizing thrombectomy evidence and recommendations.
+  - pmid: "33632884"
+    label: supporting
+    rationale: Small randomized POSITIVE trial stopped after DAWN and DEFUSE 3 removed equipoise; corroborative rather than pivotal.
+  - pmid: "25671797"
+    label: distractor
+    rationale: EXTEND-IA established perfusion-selected thrombectomy predominantly in the early treatment window, not the requested pivotal late-window evidence.
+  - pmid: "38346442"
+    label: distractor
+    rationale: SELECT2 one-year large-core follow-up addresses a materially different population and time point.
+  - pmid: "28946832"
+    label: distractor
+    rationale: DEFUSE 3 protocol paper does not report the pivotal randomized outcome results.
+  - pmid: "33627168"
+    label: distractor
+    rationale: MR CLEAN-LATE study protocol does not report trial outcomes.
+  - pmid: "29807887"
+    label: distractor
+    rationale: Retrospective cohort beyond 24 hours lies outside the question and is not randomized.
+  - pmid: "31072970"
+    label: distractor
+    rationale: DEFUSE 3 anesthesia secondary analysis does not establish thrombectomy efficacy versus medical therapy.
+  - pmid: "33077580"
+    label: distractor
+    rationale: DEFUSE 3 mortality prediction secondary analysis does not answer the randomized treatment-effect question.
+  - pmid: "36718751"
+    label: distractor
+    rationale: Non-DAWN/non-DEFUSE multicenter cohort is observational and addresses broader eligibility.
+  - pmid: "29986935"
+    label: distractor
+    rationale: DEFUSE 3 design and imaging overview is not the primary randomized outcomes report.

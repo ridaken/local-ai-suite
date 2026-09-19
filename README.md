@@ -426,6 +426,34 @@ records the dataset version it was measured against and refuses to compare
 across versions. Latency is reported but not gated, since it depends on the
 machine rather than on retrieval quality.
 
+### Research document-selection evaluation
+
+The PubMed research evaluator measures the next layer above retrieval: whether a
+tool-using chat model searches, inspects, and finally cites the independently
+adjudicated papers for a medical question. Its frozen snapshot is the reproducible
+prompt/tool regression gate; live PubMed runs are reported separately because
+upstream ranking and records change.
+
+The default target is the local `Qwen-3.6-35B-MoE-Thinking` llama.cpp endpoint on
+port 8001. The benchmark exposes only `pubmed_search`, `article_find`, and
+`article_read`, uses the Research / verify prompt in `docs/prompts.md`, and runs
+three fresh conversations per mode:
+
+```powershell
+python -m evaluation.run_research_eval --mode both --repeats 3 `
+  --json evaluation/reports/pubmed_late_window_thrombectomy_v1.json `
+  --markdown evaluation/reports/pubmed_late_window_thrombectomy_v1.md
+
+python -m evaluation.run_research_eval --mode snapshot --repeats 3 --check
+```
+
+Every snapshot run must cite all `must_select` PMIDs, cite no explicit
+`distractor`, and inspect each cited PubMed article first. Supporting documents
+are allowed. Reports include prompt, tool-schema, corpus, model, and git metadata
+so changes can be attributed rather than silently folded into one score. Use
+`--capture-snapshot` only when intentionally curating a new dataset version; a
+changed snapshot is incompatible with the stored baseline.
+
 ## Next phases
 
 Phase 4 adds reproducible dependency/image pinning, non-root/read-only containers,
