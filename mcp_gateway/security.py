@@ -181,7 +181,7 @@ class MCPBearerAuthMiddleware(BaseHTTPMiddleware):
         self.api_key = api_key
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        if request.url.path.startswith("/mcp"):
+        if request.url.path.startswith(("/mcp", "/api/")):
             header = request.headers.get("authorization", "")
             scheme, _, value = header.partition(" ")
             valid = scheme.lower() == "bearer" and hmac.compare_digest(

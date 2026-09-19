@@ -10,8 +10,9 @@ across restarts.
 
 The default Compose stack runs two application services:
 
-- `las-gateway` on `127.0.0.1:8090` exposes only `/mcp`, `/healthz`, and
-  `/readyz`. `/mcp` requires `Authorization: Bearer <MCP_API_KEY>`.
+- `las-gateway` on `127.0.0.1:8090` exposes `/mcp`, the versioned `/api/v1`
+  JSON API, and `/healthz`/`/readyz`. MCP and API routes require
+  `Authorization: Bearer <MCP_API_KEY>`.
 - `las-admin` on `127.0.0.1:8091` exposes the management UI and download worker.
   It requires `ADMIN_TOKEN`, an authenticated session, and CSRF protection.
 
@@ -94,6 +95,52 @@ custom model. Search returns abstracts for choosing papers; the article tools
 perform the auditable full-text/passages step. After rebuilding the gateway,
 reconnect or refresh the OpenWebUI integration if its cached tool list does not
 show the two article tools.
+
+The tools themselves remain usable without the custom profile. Their descriptions
+and search-result fallbacks identify PubMed/arXiv results as candidates and direct
+the client to `article_find`/`article_read`. The profile makes that multi-call
+behavior more consistent for smaller local models; it is not a private OpenWebUI
+feature or a prerequisite for other MCP clients.
+
+## JSON API clients
+
+Scripts and applications that do not implement MCP can call the same operations
+through authenticated JSON endpoints. Discover the routes and research workflow
+at `/api/v1`; retrieve a machine-readable OpenAPI 3.1 document from
+`/api/v1/openapi.json`. The JSON responses use the exact same Pydantic models as
+MCP `structuredContent`, including `article_id`, `content_level`, citations,
+offsets, warnings, and typed errors.
+
+```powershell
+$lasToken = (Get-Content -Raw config/secrets/mcp_api_key.txt).Trim()
+$lasHeaders = @{ Authorization = "Bearer $lasToken" }
+
+$papers = Invoke-RestMethod -Method Post `
+  -Uri http://localhost:8090/api/v1/pubmed/search `
+  -Headers $lasHeaders -ContentType application/json `
+  -Body (@{ query = "sepsis treatment guidelines"; limit = 5 } | ConvertTo-Json)
+
+$evidence = Invoke-RestMethod -Method Post `
+  -Uri http://localhost:8090/api/v1/articles/find `
+  -Headers $lasHeaders -ContentType application/json `
+  -Body (@{
+    article_id = $papers.results[0].article_id
+    query = "antimicrobial timing and initial fluid resuscitation"
+    limit = 5
+  } | ConvertTo-Json)
+```
+
+Available endpoints cover all gateway tools:
+
+- `/api/v1/kb/search` and `/api/v1/kb/read`
+- `/api/v1/web/search`
+- `/api/v1/pubmed/search` and `/api/v1/arxiv/search`
+- `/api/v1/articles/find` and `/api/v1/articles/read`
+- `/api/v1/calculate`
+
+Search responses retain complete abstracts in JSON. Their prose fallback shown to
+LLMs uses a bounded preview so an older, unusually long abstract cannot crowd out
+candidate selection and full-text retrieval.
 
 ### Optional legacy mcpo bridge
 
@@ -252,10 +299,13 @@ Important paths:
 
 ## Retrieval quality
 
-Tools return MCP `structuredContent` (stable id, citation, source kind, corpus
-version, retrieval/rerank scores) alongside the readable text fallback, so a
-client never has to parse prose to recover a citation. Retrieved passages are
-untrusted source material: quote and cite them, never follow them.
+Tools return MCP `structuredContent` and identical REST JSON (stable id, citation,
+source kind, corpus version, retrieval/rerank scores) alongside the readable MCP
+text fallback, so a client never has to parse prose to recover a citation.
+Retrieved passages are untrusted source material: quote and cite them, never
+follow them. `article_find` excludes bibliography/reference chunks from evidence
+ranking while `article_read` still permits sequential access to the complete
+extracted document.
 
 Ingest requires a stable unique `id` per source in `ingest/sources.yaml`, and
 records a per-file `status`/`reason` in the manifest so skipped and errored

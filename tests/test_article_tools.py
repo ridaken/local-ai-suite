@@ -68,6 +68,38 @@ def test_article_find_reports_full_text_passages_and_offsets(monkeypatch):
     assert response.passages[0].end_offset > response.passages[0].offset
 
 
+def test_article_find_excludes_reference_chunks(monkeypatch):
+    article = LoadedArticle(
+        article_id="pubmed:1",
+        provider="pubmed",
+        title="Guideline",
+        citation="https://pubmed.ncbi.nlm.nih.gov/1/",
+        content_level="full_text",
+        extraction_method="pmc_jats_xml",
+        text=(
+            "## Recommendations\n\nTreat septic shock with norepinephrine.\n\n"
+            + ("supporting context " * 140)
+            + "\n\n## References\n\n"
+            + ("reference-only septic shock norepinephrine treatment guideline " * 120)
+        ),
+    )
+
+    async def fake_load(_article_id):
+        return article
+
+    monkeypatch.setattr(article_mod, "load_article", fake_load)
+    monkeypatch.setattr(config, "RERANK_URL", "")
+    response = asyncio.run(
+        article_mod.article_find_response(
+            "pubmed:1", "septic shock norepinephrine treatment guideline", 5
+        )
+    )
+    assert response.passages
+    assert all(passage.section != "References" for passage in response.passages)
+    assert all("reference-only" not in passage.text for passage in response.passages)
+    assert response.passages[0].section == "Recommendations"
+
+
 def test_article_read_pages_and_labels_abstract_fallback(monkeypatch):
     article = LoadedArticle(
         article_id="pubmed:2",

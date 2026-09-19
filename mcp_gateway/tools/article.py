@@ -487,24 +487,51 @@ def _section_at(text: str, offset: int) -> str:
 
 def _chunks(text: str, query: str) -> list[_Chunk]:
     terms = [term for term in _WORD.findall(query.lower()) if term not in _STOPWORDS]
-    lowered = text.lower()
+    reference_heading = re.search(
+        r"(?mi)^#{1,6}\s+(references|bibliography|literature cited)\s*$", text
+    )
+    searchable_end = reference_heading.start() if reference_heading else len(text)
+    lowered = text[:searchable_end].lower()
     size, overlap = 2000, 200
     chunks = []
     start = 0
-    while start < len(text):
-        target = min(len(text), start + size)
+    while start < searchable_end:
+        target = min(searchable_end, start + size)
         end = target
-        if target < len(text):
+        if target < searchable_end:
             boundary = text.rfind("\n", start + size // 2, target)
             if boundary > start:
                 end = boundary
         body = text[start:end].strip()
         if body:
+            section = _section_at(text, start)
+            opening_heading = re.match(r"^#{1,6}\s+(.+)$", body.splitlines()[0])
+            if opening_heading:
+                section = opening_heading.group(1).strip()
             low = lowered[start:end]
             phrase = low.count(query.lower()) * 3 if query else 0
-            score = float(phrase + sum(low.count(term) for term in terms))
-            chunks.append(_Chunk(_section_at(text, start), body, start, end, score))
-        if end >= len(text):
+            section_low = section.lower()
+            section_matches = sum(section_low.count(term) for term in terms)
+            evidence_heading = any(
+                marker in section_low
+                for marker in (
+                    "abstract",
+                    "conclusion",
+                    "discussion",
+                    "method",
+                    "recommendation",
+                    "result",
+                    "rationale",
+                )
+            )
+            score = float(
+                phrase
+                + sum(low.count(term) for term in terms)
+                + section_matches * 3
+                + (1 if evidence_heading else 0)
+            )
+            chunks.append(_Chunk(section, body, start, end, score))
+        if end >= searchable_end:
             break
         start = max(start + 1, end - overlap)
     return chunks

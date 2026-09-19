@@ -74,7 +74,8 @@ WORKFLOW for any request involving factual claims:
    research claims, calculate for any arithmetic. PubMed/arXiv search results
    are candidate lists, not evidence that a paper was read: inspect their
    abstracts, choose the most relevant article_id values, then call article_find
-   for passages supporting each load-bearing claim. Call article_read at a
+   with a focused query for each major claim cluster; avoid one broad query that
+   mixes unrelated treatment, methods, and limitations. Call article_read at a
    returned offset when you need surrounding context, methods, limitations, or
    sequential pages. Check content_level on every article response: full_text,
    abstract, and metadata are materially different evidence.

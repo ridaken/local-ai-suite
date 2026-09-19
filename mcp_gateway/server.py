@@ -1,8 +1,9 @@
 """local-ai-suite MCP gateway.
 
 The server is passive: it advertises and executes tools while the client drives
-the agent loop. Stdio remains the default. LAS_TRANSPORT=http exposes only the
-authenticated streamable-HTTP MCP endpoint plus health/readiness probes.
+the agent loop. Stdio remains the default. LAS_TRANSPORT=http exposes the
+authenticated streamable-HTTP MCP endpoint, an equivalent versioned JSON API,
+and health/readiness probes.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from . import config
+from .http_api import api_routes
 from .limits import tool_slot
 from .schemas import (
     ArticlePassageResponse,
@@ -162,7 +164,7 @@ async def calculate(expression: str) -> CalculationResponse:
 
 
 def build_app(*, api_key: str | None = None, settings: SettingsStore | None = None) -> Starlette:
-    """Build the authenticated MCP-only hosted ASGI application."""
+    """Build the authenticated MCP and JSON API hosted application."""
     api_key = api_key if api_key is not None else config.MCP_API_KEY
     if not api_key:
         raise ValueError("MCP_API_KEY is required for HTTP transport")
@@ -188,7 +190,12 @@ def build_app(*, api_key: str | None = None, settings: SettingsStore | None = No
             yield
 
     app = Starlette(
-        routes=[Route("/healthz", healthz), Route("/readyz", readyz), *mcp_app.routes],
+        routes=[
+            Route("/healthz", healthz),
+            Route("/readyz", readyz),
+            *api_routes(),
+            *mcp_app.routes,
+        ],
         lifespan=lifespan,
     )
     app.add_middleware(MCPBearerAuthMiddleware, api_key=api_key)
