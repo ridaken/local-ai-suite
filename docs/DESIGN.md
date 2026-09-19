@@ -114,6 +114,10 @@ matter more than corpus size).
   - `web_search(query)` — SearXNG/Kagi.
   - `pubmed_search(query)` — NCBI E-utilities (live, always current).
   - `arxiv_search(query)` — arXiv API (live).
+  - `article_find(article_id, query)` — download a selected PubMed/PMC or arXiv
+    article and return query-relevant passages with evidence-level metadata.
+  - `article_read(article_id, offset)` — page through the selected article's
+    normalized text; explicitly reports full-text versus abstract fallback.
   - `calculate(expr)` / `python_exec(code)` — sandboxed Python (sympy/numpy) for
     math; more flexible than Wolfram for most needs.
   - Optional: `wolfram(query)` (API key), `units`, `datetime`.

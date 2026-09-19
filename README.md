@@ -88,6 +88,13 @@ to `las-clients`, then configure the endpoint and bearer header above. Only the
 gateway and client integrations join this network; Qdrant, Kiwix, and admin stay
 on the backend side of the boundary.
 
+For research profiles, enable `pubmed_search`, `arxiv_search`, `article_find`,
+and `article_read` together and paste the profile from `docs/prompts.md` into the
+custom model. Search returns abstracts for choosing papers; the article tools
+perform the auditable full-text/passages step. After rebuilding the gateway,
+reconnect or refresh the OpenWebUI integration if its cached tool list does not
+show the two article tools.
+
 ### Optional legacy mcpo bridge
 
 `mcpo` is no longer started by default and publishes no host port. To enable the

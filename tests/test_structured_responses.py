@@ -11,7 +11,14 @@ import asyncio
 import pytest
 
 from mcp_gateway import server
-from mcp_gateway.schemas import CalculationResponse, ReadResponse, SearchResponse
+from mcp_gateway.schemas import (
+    ArticlePassage,
+    ArticlePassageResponse,
+    ArticleReadResponse,
+    CalculationResponse,
+    ReadResponse,
+    SearchResponse,
+)
 from retrieval.hybrid import Candidate, HybridResult
 
 _SEARCH_TOOLS = ["kb_search", "web_search", "pubmed_search", "arxiv_search"]
@@ -22,7 +29,9 @@ def _tool(name):
     return next(t for t in tools if t.name == name)
 
 
-@pytest.mark.parametrize("name", [*_SEARCH_TOOLS, "kb_read", "calculate"])
+@pytest.mark.parametrize(
+    "name", [*_SEARCH_TOOLS, "kb_read", "article_find", "article_read", "calculate"]
+)
 def test_every_tool_advertises_an_output_schema(name):
     assert _tool(name).outputSchema is not None
 
@@ -33,7 +42,7 @@ def test_search_tools_share_the_standard_response_shape(name):
     assert set(properties) >= {"query", "results", "warnings", "retrieved_at"}
 
 
-@pytest.mark.parametrize("name", [*_SEARCH_TOOLS, "kb_read"])
+@pytest.mark.parametrize("name", [*_SEARCH_TOOLS, "kb_read", "article_find", "article_read"])
 def test_tool_descriptions_mark_sources_untrusted(name):
     assert "untrusted" in (_tool(name).description or "").lower()
 
@@ -125,6 +134,55 @@ def test_kb_read_end_of_document_has_no_next_offset(monkeypatch):
     assert parsed.next_offset is None
     assert parsed.end_of_document is True
     assert "[end of article]" in result.content[0].text
+
+
+def test_article_tools_return_evidence_level_and_offsets(monkeypatch):
+    async def fake_find(article_id, query, limit=5):  # noqa: ARG001
+        return ArticlePassageResponse(
+            article_id=article_id,
+            query=query,
+            title="Study",
+            citation="https://example.test/study",
+            provider="pubmed",
+            content_level="full_text",
+            extraction_method="pmc_jats_xml",
+            passages=[
+                ArticlePassage(
+                    section="Results", text="It worked.", offset=90, end_offset=100
+                )
+            ],
+        )
+
+    async def fake_read(article_id, offset=0):
+        return ArticleReadResponse(
+            article_id=article_id,
+            title="Study",
+            citation="https://example.test/study",
+            provider="pubmed",
+            content_level="full_text",
+            extraction_method="pmc_jats_xml",
+            text="context",
+            offset=offset,
+            next_offset=None,
+            total_length=7,
+            end_of_document=True,
+        )
+
+    monkeypatch.setattr(server.article_mod, "article_find_response", fake_find)
+    monkeypatch.setattr(server.article_mod, "article_read_response", fake_read)
+    found = asyncio.run(
+        server.mcp.call_tool(
+            "article_find", {"article_id": "pubmed:1", "query": "worked", "limit": 1}
+        )
+    )
+    read = asyncio.run(
+        server.mcp.call_tool("article_read", {"article_id": "pubmed:1", "offset": 0})
+    )
+    assert found.structuredContent["content_level"] == "full_text"
+    assert found.structuredContent["passages"][0]["offset"] == 90
+    assert read.structuredContent["extraction_method"] == "pmc_jats_xml"
+    assert "It worked." in found.content[0].text
+    assert "context" in read.content[0].text
 
 
 def test_calculate_returns_structured_result():
