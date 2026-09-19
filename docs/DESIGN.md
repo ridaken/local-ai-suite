@@ -113,6 +113,10 @@ matter more than corpus size).
   - `web_search(query)` — Kagi today, with SearXNG reserved as a future backend.
   - `pubmed_search(query)` — NCBI E-utilities (live, always current).
   - `arxiv_search(query)` — arXiv API (live).
+  - `article_find(article_id, query)` — download a selected PubMed/PMC or arXiv
+    article and return query-relevant passages with evidence-level metadata.
+  - `article_read(article_id, offset)` — page through the selected article's
+    normalized text; explicitly reports full-text versus abstract fallback.
   - `calculate(expression)` — bounded arithmetic and whitelisted math functions.
   - Possible future tools: sandboxed Python, Wolfram, units, and datetime.
   - Optional `route(origin, destination, mode)` — see geospatial subsystem below.

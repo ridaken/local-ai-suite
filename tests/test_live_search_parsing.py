@@ -65,24 +65,21 @@ def test_web_search_parses_kagi_results(monkeypatch):
     assert "untrusted source material" in text
 
 
-def test_pubmed_parses_esearch_then_esummary(monkeypatch):
+def test_pubmed_parses_esearch_then_efetch_abstract(monkeypatch):
     esearch = json.dumps({"esearchresult": {"idlist": ["12345"]}}).encode()
-    esummary = json.dumps(
-        {
-            "result": {
-                "12345": {
-                    "title": "Thyroid study.",
-                    "source": "J Endo",
-                    "pubdate": "2024 Jan",
-                    "authors": [{"name": "Smith A"}, {"name": "Jones B"}],
-                }
-            }
-        }
-    ).encode()
+    efetch = b"""<PubmedArticleSet><PubmedArticle><MedlineCitation>
+      <PMID>12345</PMID><Article><ArticleTitle>Thyroid study.</ArticleTitle>
+      <Abstract><AbstractText Label="RESULTS">Treatment helped.</AbstractText></Abstract>
+      <AuthorList><Author><ForeName>A</ForeName><LastName>Smith</LastName></Author>
+      <Author><ForeName>B</ForeName><LastName>Jones</LastName></Author></AuthorList>
+      <Journal><Title>J Endo</Title><JournalIssue><PubDate><Year>2024</Year>
+      <Month>Jan</Month></PubDate></JournalIssue></Journal></Article></MedlineCitation>
+      <PubmedData><ArticleIdList><ArticleId IdType="pmc">PMC99</ArticleId>
+      </ArticleIdList></PubmedData></PubmedArticle></PubmedArticleSet>"""
     monkeypatch.setattr(
         pubmed_mod.httpx,
         "AsyncClient",
-        lambda **_kw: _Client([_response(esearch), _response(esummary)]),
+        lambda **_kw: _Client([_response(esearch), _response(efetch)]),
     )
 
     response = asyncio.run(pubmed_mod.pubmed_search_response("thyroid"))
@@ -93,7 +90,10 @@ def test_pubmed_parses_esearch_then_esummary(monkeypatch):
     assert result.source_kind == "pubmed"
     assert result.citation == "https://pubmed.ncbi.nlm.nih.gov/12345/"
     assert result.title == "Thyroid study"
-    assert "Smith A et al." in result.excerpt
+    assert "A Smith et al." in result.excerpt
+    assert result.abstract == "RESULTS: Treatment helped."
+    assert result.article_id == "pubmed:12345"
+    assert result.available_content == ["metadata", "abstract", "full_text"]
 
 
 def test_pubmed_no_hits_is_empty_not_error(monkeypatch):
@@ -132,3 +132,5 @@ def test_arxiv_parses_atom_entries(monkeypatch):
     assert result.title == "Attention Everywhere"
     assert "A. Author et al." in result.excerpt
     assert "2024-01-02" in result.excerpt
+    assert result.article_id == "arxiv:2401.00001"
+    assert result.abstract == "We study attention."

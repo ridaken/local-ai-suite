@@ -7,6 +7,8 @@ and the arXiv URL for citation.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from urllib.parse import urlsplit
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -32,10 +34,66 @@ _ATOM = "{http://www.w3.org/2005/Atom}"
 _WS_RE = re.compile(r"\s+")
 
 
+@dataclass(frozen=True)
+class ArxivRecord:
+    arxiv_id: str
+    title: str
+    abstract: str
+    authors: tuple[str, ...]
+    published: str
+    citation: str
+
+
 def _clean(text: str | None) -> str:
     if not text:
         return ""
     return _WS_RE.sub(" ", text).strip()
+
+
+def _id_from_url(url: str) -> str:
+    path = urlsplit(url).path.strip("/")
+    return path.removeprefix("abs/")
+
+
+def parse_arxiv_feed(payload: bytes) -> list[ArxivRecord]:
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        raise UpstreamResponseError(
+            "upstream_malformed", "arXiv returned malformed XML"
+        ) from exc
+    records = []
+    for entry in root.findall(f"{_ATOM}entry"):
+        url = _clean(entry.findtext(f"{_ATOM}id"))
+        arxiv_id = _id_from_url(url)
+        if not arxiv_id:
+            continue
+        records.append(
+            ArxivRecord(
+                arxiv_id=arxiv_id,
+                title=_clean(entry.findtext(f"{_ATOM}title")) or "(untitled)",
+                abstract=_clean(entry.findtext(f"{_ATOM}summary")),
+                authors=tuple(
+                    _clean(author.findtext(f"{_ATOM}name"))
+                    for author in entry.findall(f"{_ATOM}author")
+                    if _clean(author.findtext(f"{_ATOM}name"))
+                ),
+                published=_clean(entry.findtext(f"{_ATOM}published"))[:10],
+                citation=url,
+            )
+        )
+    return records
+
+
+async def fetch_arxiv_record(client: httpx.AsyncClient, arxiv_id: str) -> ArxivRecord | None:
+    response = await client.get(
+        config.ARXIV_API_URL,
+        params={"id_list": arxiv_id, "max_results": "1"},
+        headers={"User-Agent": config.USER_AGENT},
+    )
+    response.raise_for_status()
+    records = parse_arxiv_feed(response_bytes(response))
+    return records[0] if records else None
 
 
 async def arxiv_search_response(query: str, limit: int = 5) -> SearchResponse:
@@ -66,33 +124,28 @@ async def arxiv_search_response(query: str, limit: int = 5) -> SearchResponse:
         )
 
     try:
-        root = ET.fromstring(response_bytes(resp))
+        records = parse_arxiv_feed(response_bytes(resp))
     except UpstreamResponseError as exc:
         return search_error(query, exc.code, error_text("arxiv_search", exc))
-    except ET.ParseError:
-        return search_error(
-            query,
-            "upstream_malformed",
-            "arxiv_search error [upstream_malformed]: arXiv returned malformed XML.",
-        )
 
     results = []
-    for entry in root.findall(f"{_ATOM}entry"):
-        url = _clean(entry.findtext(f"{_ATOM}id"))
-        published = _clean(entry.findtext(f"{_ATOM}published"))[:10]
-        authors = [_clean(a.findtext(f"{_ATOM}name")) for a in entry.findall(f"{_ATOM}author")]
-        byline = authors[0] + (" et al." if len(authors) > 1 else "") if authors else ""
-        summary = _clean(entry.findtext(f"{_ATOM}summary"))
-        if len(summary) > 300:
-            summary = summary[:297] + "..."
-        meta = ", ".join(x for x in [byline, published] if x)
+    for record in records:
+        byline = (
+            record.authors[0] + (" et al." if len(record.authors) > 1 else "")
+            if record.authors
+            else ""
+        )
+        meta = ", ".join(x for x in [byline, record.published] if x)
         results.append(
             SearchResult(
-                id=f"arxiv:{url}" if url else "",
-                title=_clean(entry.findtext(f"{_ATOM}title")) or "(untitled)",
-                excerpt="\n   ".join(x for x in [meta, summary] if x),
+                id=f"arxiv:{record.citation}",
+                article_id=f"arxiv:{record.arxiv_id}",
+                title=record.title,
+                excerpt=meta,
+                abstract=record.abstract or None,
+                available_content=["metadata", "abstract", "full_text"],
                 source_kind=SOURCE_ARXIV,
-                citation=url,
+                citation=record.citation,
             )
         )
     return SearchResponse(query=query, results=results)
@@ -102,7 +155,10 @@ def render(response: SearchResponse) -> str:
     return render_search(
         response,
         heading="arXiv results",
-        footer="These are arXiv preprints; cite the URLs above.",
+        footer=(
+            "Search results are candidates, not proof. Select relevant article_id values and "
+            "call article_find/article_read before citing paper contents."
+        ),
     )
 
 
