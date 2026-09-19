@@ -87,10 +87,10 @@ services:
       NCBI_API_KEY_FILE: /run/secrets/ncbi_api_key
       MCP_ALLOWED_HOSTS: "127.0.0.1:*,localhost:*,[::1]:*,las-gateway:*,gateway:*"
       KIWIX_URL: http://kiwix:8080
-      KIWIX_PUBLIC_URL: ${KIWIX_PUBLIC_URL:-http://localhost:8080}
+      KIWIX_PUBLIC_URL: ${KIWIX_PUBLIC_URL:-http://localhost:${KIWIX_PORT:-8080}}
       QDRANT_URL: http://qdrant:6333
-      EMBED_URL: http://host.docker.internal:8081/v1/embeddings
-      RERANK_URL: http://host.docker.internal:8082/v1/rerank
+      EMBED_URL: ${CONTAINER_EMBED_URL-http://host.docker.internal:8081/v1/embeddings}
+      RERANK_URL: ${CONTAINER_RERANK_URL-http://host.docker.internal:8082/v1/rerank}
       ZIM_DIR: /corpus
       LIBRARY_XML_PATH: /corpus/library.xml
       STATE_DIR: /state
@@ -136,8 +136,8 @@ services:
       ADMIN_ALLOWED_ORIGINS: "http://localhost:${ADMIN_PORT:-8091},http://127.0.0.1:${ADMIN_PORT:-8091}"
       KIWIX_URL: http://kiwix:8080
       QDRANT_URL: http://qdrant:6333
-      EMBED_URL: http://host.docker.internal:8081/v1/embeddings
-      RERANK_URL: http://host.docker.internal:8082/v1/rerank
+      EMBED_URL: ${CONTAINER_EMBED_URL-http://host.docker.internal:8081/v1/embeddings}
+      RERANK_URL: ${CONTAINER_RERANK_URL-http://host.docker.internal:8082/v1/rerank}
       ZIM_DIR: /corpus
       KIWIX_DATA_DIR: /data
       LIBRARY_XML_PATH: /corpus/library.xml

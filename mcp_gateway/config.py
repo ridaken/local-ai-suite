@@ -109,6 +109,8 @@ QDRANT_STORAGE = os.environ.get("QDRANT_STORAGE", "").strip()
 # Blank EMBED_URL also disables the vector tier.
 EMBED_URL = os.environ.get("EMBED_URL", "http://localhost:8081/v1/embeddings").strip()
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "bge-m3").strip()
+# Bump when serving different weights under the same model name.
+EMBED_MODEL_REVISION = os.environ.get("EMBED_MODEL_REVISION", "").strip()
 EMBED_DIM = _bounded_int("EMBED_DIM", 1024, 1, 65536)  # bge-m3 = 1024
 RERANK_URL = os.environ.get("RERANK_URL", "http://localhost:8082/v1/rerank").strip()
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "bge-reranker-v2-m3").strip()
@@ -344,6 +346,7 @@ CONFIG_FIELDS = (
     {"name": "QDRANT_COLLECTION", "label": "Qdrant collection", "group": "vector"},
     {"name": "EMBED_URL", "label": "Embedding URL", "group": "vector"},
     {"name": "EMBED_MODEL", "label": "Embedding model", "group": "vector"},
+    {"name": "EMBED_MODEL_REVISION", "label": "Embedding model revision", "group": "vector"},
     {"name": "EMBED_DIM", "label": "Embedding dimensions", "group": "vector", "type": "int"},
     {"name": "RERANK_URL", "label": "Rerank URL", "group": "vector"},
     {"name": "RERANK_MODEL", "label": "Rerank model", "group": "vector"},
